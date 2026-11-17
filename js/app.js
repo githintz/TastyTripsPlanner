@@ -1,6 +1,6 @@
 import {
-  store, CATEGORIES, VEG, getSettings, saveSettings, isConnected, testConnection, uniqueId, slugify,
-  loadConfig, backendKind, getName, setName, getTripCode, setTripCode,
+  store, CATEGORIES, VEG, isConnected, uniqueId,
+  loadConfig, getName, setName, getKeys, addKey, removeKey,
 } from './store.js';
 import { hydrateImage, resizeImage } from './images.js';
 
@@ -34,6 +34,11 @@ const I = {
   x: svg('<path d="M6 6l12 12M18 6L6 18"/>', 'sm'),
   share: svg('<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/>', 'xs'),
   history: svg('<path d="M3 12a9 9 0 103-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>', 'sm'),
+  heart: svg('<path d="M12 20s-7-4.4-9-9.2C1.7 7.4 3.9 4.5 7 4.5c2 0 3.4 1.1 5 3 1.6-1.9 3-3 5-3 3.1 0 5.3 2.9 4 6.3C19 15.6 12 20 12 20z"/>'),
+  heartSm: svg('<path d="M12 20s-7-4.4-9-9.2C1.7 7.4 3.9 4.5 7 4.5c2 0 3.4 1.1 5 3 1.6-1.9 3-3 5-3 3.1 0 5.3 2.9 4 6.3C19 15.6 12 20 12 20z"/>', 'xs'),
+  userPlus: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M19 8v6M16 11h6"/>'),
+  userPlusSm: svg('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M19 8v6M16 11h6"/>', 'sm'),
+  key: svg('<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>', 'sm'),
 };
 const PH = {
   main: '<path d="M3 12h18a9 9 0 01-18 0z"/><path d="M8 8c0-2 1.5-3 4-3s4 1 4 3"/>',
@@ -98,7 +103,8 @@ function hydrate(root, items) {
 // ---------------------------------------------------------------- state
 
 const getTrip = (id) => store.data.trips.find((t) => t.id === id);
-const ui = { tab: 'food', cat: 'all', q: '' };
+const ui = { tab: 'food', cat: 'all', q: '', sort: lsGet('tt.sort', 'category') === 'interest' ? 'interest' : 'category' };
+let lastLiked = null; // food id whose heart should "pop" on the next render
 function activeLoc(trip) {
   const saved = lsGet(`tt.loc.${trip.id}`, '');
   return trip.locations.find((l) => l.id === saved) || trip.locations[0] || null;
@@ -174,8 +180,7 @@ function refresh() {
 }
 
 function syncButton() {
-  const kind = backendKind();
-  const cls = kind ? (store.mode === kind ? 'on' : 'warn') : (store.hasLocalChanges() ? 'warn' : '');
+  const cls = store.mode === 'shared' ? (store.loadError ? 'warn' : 'on') : '';
   return `<button class="icon-btn sync-dot ${cls}" data-action="settings" aria-label="Sync and settings">${I.cloud}</button>`;
 }
 
@@ -196,9 +201,24 @@ function tripsPage(quiet = false) {
             <div class="stats"><span><b>${t.foods.length}</b> dishes</span><span><b>${(t.destinations || []).length}</b> destinations</span></div>
           </div>
         </a>`).join('')}
-      <button class="new-trip" data-action="new-trip">${I.plus}New trip</button>
+      ${store.canCreate() ? `<button class="new-trip" data-action="new-trip">${I.plus}New trip</button>` : ''}
     </div>
+    ${store.mode === 'shared' && !trips.length ? joinBox() : ''}
   </main>`;
+}
+
+function joinBox() {
+  const admin = store.access.admin;
+  return `<div class="empty join">
+    <h2>${admin ? 'No trips here yet' : 'Join a trip'}</h2>
+    <p>${admin ? 'Create a trip, or move the trips from the old data file.' : 'Open the invite link a friend sent you, or paste the invite code here.'}</p>
+    ${admin ? `<button class="secondary-btn" data-action="migrate" style="margin-top:16px">${I.upload}Move trips from the old data file</button>` : `
+    <form class="join-row" id="join-form">
+      <label class="sr-only" for="join-code">Invite code</label>
+      <input class="input" id="join-code" placeholder="Invite code" autocomplete="off" autocapitalize="off">
+      <button class="primary-btn" type="submit">Join</button>
+    </form>`}
+  </div>`;
 }
 
 // ---------------------------------------------------------------- trip page
@@ -208,7 +228,7 @@ function tripPage(trip, quiet = false) {
   return `<main class="page"${quiet ? ' style="animation:none"' : ''}>
     <div class="topbar">
       <a class="back" href="#/">${I.back}Trips</a>
-      <div style="display:flex;gap:8px">${syncButton()}<button class="icon-btn" data-action="edit-trip" aria-label="Edit trip">${I.more}</button></div>
+      <div style="display:flex;gap:8px">${store.mode === 'shared' ? `<button class="icon-btn" data-action="invite" aria-label="Invite people to this trip">${I.userPlus}</button>` : ''}${syncButton()}<button class="icon-btn" data-action="edit-trip" aria-label="Edit trip">${I.more}</button></div>
     </div>
     <div class="hero-title">
       <h1>${esc(trip.name)}</h1>
@@ -238,9 +258,16 @@ function foodTab(trip, quiet) {
       <button class="pill" data-action="cat" data-cat="all" aria-pressed="${ui.cat === 'all'}">All<span class="n">${trip.foods.length}</span></button>
       ${CATEGORIES.map((c) => `<button class="pill" data-action="cat" data-cat="${c.id}" aria-pressed="${ui.cat === c.id}">${c.label}<span class="n">${counts[c.id]}</span></button>`).join('')}
     </div>
-    <label class="search">${I.search}<span class="sr-only">Search dishes</span>
-      <input id="food-search" type="search" placeholder="Search dishes or restaurants" value="${esc(ui.q)}" autocomplete="off">
-    </label>
+    <div class="search-row">
+      <label class="search">${I.search}<span class="sr-only">Search dishes</span>
+        <input id="food-search" type="search" placeholder="Search dishes or restaurants" value="${esc(ui.q)}" autocomplete="off">
+      </label>
+      <div class="segmented sm sort" role="group" aria-label="Sort by">
+        <span class="thumb"></span>
+        <button data-action="sort" data-value="category" aria-pressed="${ui.sort === 'category'}">Category</button>
+        <button data-action="sort" data-value="interest" aria-pressed="${ui.sort === 'interest'}">${I.heartSm}Interest</button>
+      </div>
+    </div>
     <div id="food-groups">${foodGroups(trip, quiet)}</div>
     <div class="fade-bottom"></div>
     <button class="fab" data-action="add-food"${quiet ? ' style="animation:none"' : ''}>${I.plus}Add dish</button>`;
@@ -253,7 +280,17 @@ function foodGroups(trip, quiet = false) {
     || Object.values(f.spots || {}).some((arr) => arr.some((s) => s.name.toLowerCase().includes(q)));
   const cats = ui.cat === 'all' ? CATEGORIES : CATEGORIES.filter((c) => c.id === ui.cat);
   let i = 0;
-  const groups = cats.map((c) => {
+  if (ui.sort === 'interest') {
+    const foods = trip.foods.filter((f) => (ui.cat === 'all' || f.category === ui.cat) && match(f))
+      .sort((a, b) => (b.likes || []).length - (a.likes || []).length || a.name.localeCompare(b.name));
+    if (foods.length) {
+      return `<section class="group">
+        <div class="group-head"><h2>Most interest</h2><span>${foods.length} dish${foods.length === 1 ? '' : 'es'}</span></div>
+        <div class="food-grid">${foods.map((f) => foodCard(trip, f, loc, quiet ? 0 : Math.min(i++, 12), quiet)).join('')}</div>
+      </section>`;
+    }
+  }
+  const groups = ui.sort === 'interest' ? '' : cats.map((c) => {
     const foods = trip.foods.filter((f) => f.category === c.id && match(f));
     if (!foods.length) return '';
     return `<section class="group">
@@ -271,15 +308,28 @@ function foodGroups(trip, quiet = false) {
 function foodCard(trip, f, loc, i, quiet) {
   const spots = (loc && f.spots && f.spots[loc.id]) || [];
   const top = spots.find((s) => s.name);
-  const topLine = !loc ? '' : top ? `Top in ${esc(loc.name)}: ${esc(top.name)}` : `No spots in ${esc(loc.name)} yet`;
-  return `<a class="food-card" href="#/trip/${encodeURIComponent(trip.id)}/food/${encodeURIComponent(f.id)}" style="--i:${i}${quiet ? ';animation:none' : ''}">
+  const likes = f.likes || [];
+  let topLine = !loc ? '' : top ? `Top in ${esc(loc.name)}: ${esc(top.name)}` : `No spots in ${esc(loc.name)} yet`;
+  if (ui.sort === 'interest') topLine = likes.length ? `${I.heartSm}${esc(likes.join(', '))}` : 'No interest yet';
+  return `<div class="food-card" style="--i:${i}${quiet ? ';animation:none' : ''}">
+    <a class="card-link" href="#/trip/${encodeURIComponent(trip.id)}/food/${encodeURIComponent(f.id)}" aria-label="${esc(f.name)}"></a>
     <div class="photo cat-${esc(f.category)}"><img alt="" data-img="food:${esc(f.id)}">${phIcon(f.category)}</div>
     <div class="body">
       <div class="row"><span class="name">${esc(f.name)}</span>${vegBadge(f.veg)}</div>
       <span class="price">${priceRange(f, trip.currency)} <span>· ${priceRange(f, trip.currency, true)}</span></span>
       ${topLine ? `<span class="top">${topLine}</span>` : ''}
     </div>
-  </a>`;
+    ${likeButton(f)}
+  </div>`;
+}
+
+function likeButton(f, wide = false) {
+  const likes = f.likes || [];
+  const mine = !!getName() && likes.includes(getName());
+  const label = `${mine ? 'Remove your interest in' : "I'm interested in"} ${f.name}. ${likes.length} interested`;
+  return `<button class="like-btn${wide ? ' wide' : ''}${lastLiked === f.id ? ' pop' : ''}" data-action="like" data-food="${esc(f.id)}" aria-pressed="${mine}" aria-label="${esc(label)}" title="${esc(likes.join(', ') || 'No one yet')}">
+    ${I.heart}${wide ? `<span>${mine ? 'Interested' : "I'm interested"}</span>` : ''}<span class="n">${likes.length || ''}</span>
+  </button>`;
 }
 
 function refreshGroups(trip) {
@@ -353,6 +403,12 @@ function fillDetail(trip, food) {
         <div class="tile"><span class="k">Vegetarian</span>${vegBadge(food.veg, true)}<span class="sub" id="veg-note">${esc(vegNote(food, trip, loc))}</span></div>
         <div class="tile"><span class="k">Price estimate</span><span class="big">${priceRange(food, trip.currency)}</span><span class="sub">${priceRange(food, trip.currency, true)}</span></div>
       </div>
+      <section class="interest">
+        <div class="where-head"><h2>Who's interested</h2>${likeButton(food, true)}</div>
+        ${(food.likes || []).length
+    ? `<div class="people">${food.likes.map((n) => `<span class="person">${avatar(n)}${esc(n)}</span>`).join('')}</div>`
+    : '<p class="hint" style="margin:0">Nobody yet. Tap the heart if you want to try it.</p>'}
+      </section>
       <section style="display:flex;flex-direction:column;gap:12px">
         <div class="where-head">
           <h2>Where to eat</h2>
@@ -553,13 +609,13 @@ function foodForm(trip, food) {
         const file = e.target.files[0];
         if (!file) return;
         try {
-          const blob = await resizeImage(file, isConnected() ? 1600 : 900);
+          const blob = await resizeImage(file, isConnected() ? 1400 : 900);
           if (isConnected()) {
-            pendingUpload = { blob, name: `${slugify($('#ff-name', el).value || 'dish')}-${Date.now().toString(36)}.jpg` };
-            setOwn(true, 'Photo will be uploaded to your repo when you save.');
+            pendingUpload = { blob };
+            setOwn(true, 'Photo will be uploaded when you save.');
           } else {
-            f.image = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
-            setOwn(true, 'Saved in this browser only. Connect GitHub to keep photos everywhere.');
+            f.image = await store.uploadImage(blob);
+            setOwn(true, 'Saved in this browser only.');
           }
           showPhoto();
         } catch { toast('Could not read that image', true); }
@@ -650,7 +706,7 @@ function foodForm(trip, food) {
       if (pendingUpload) {
         const btn = $('[data-sheet="save"]', el);
         btn.disabled = true; btn.textContent = 'Uploading…';
-        try { out.image = await store.uploadImage(pendingUpload.blob, pendingUpload.name); } catch (e) {
+        try { out.image = await store.uploadImage(pendingUpload.blob); } catch (e) {
           btn.disabled = false; btn.textContent = 'Save';
           return fail(`Photo upload failed: ${e.message}`);
         }
@@ -663,7 +719,9 @@ function foodForm(trip, food) {
         const t = d.trips.find((x) => x.id === tid);
         if (!t) return;
         const idx = t.foods.findIndex((x) => x.id === out.id);
-        if (idx >= 0) t.foods[idx] = JSON.parse(JSON.stringify(out)); else t.foods.push(JSON.parse(JSON.stringify(out)));
+        // Keep everyone's hearts, including ones added while this form was open.
+        if (idx >= 0) t.foods[idx] = { ...JSON.parse(JSON.stringify(out)), likes: t.foods[idx].likes || [] };
+        else t.foods.push({ ...JSON.parse(JSON.stringify(out)), likes: [] });
       }, `${food ? 'Update' : 'Add'} dish: ${name}`,
       { kind: 'dish', action: food ? 'edited' : 'added', tripId: tid, tripName: trip.name, foodId: out.id, target: name, details });
       return true;
@@ -708,7 +766,7 @@ function tripForm(trip, { addLocation = false } = {}) {
     <div class="field"><label for="tf-cover">Cover photo link (optional)</label>
       <input class="input" id="tf-cover" value="${esc(t.cover)}" placeholder="https://…" autocomplete="off"></div>
     <span class="hint err" id="tf-err" hidden></span>
-    ${isNew ? '' : `<button class="danger-btn" type="button" id="tf-delete">${I.trash}<span>Delete trip</span></button>`}`;
+    ${isNew || (store.mode === 'shared' && !store.access.admin) ? '' : `<button class="danger-btn" type="button" id="tf-delete">${I.trash}<span>Delete trip</span></button>`}`;
   openSheet({
     title: isNew ? 'New trip' : 'Edit trip',
     body,
@@ -746,7 +804,7 @@ function tripForm(trip, { addLocation = false } = {}) {
       if (isNew) {
         const id = uniqueId(name, store.data.trips.map((x) => x.id));
         const nt = { ...t, id, name, cover, coverWiki: [name], currency, locations };
-        store.update((d) => { d.trips.push(JSON.parse(JSON.stringify(nt))); }, `Add trip: ${name}`,
+        store.update((d) => { if (!d.trips.some((x) => x.id === id)) d.trips.push(JSON.parse(JSON.stringify(nt))); }, `Add trip: ${name}`,
           { kind: 'trip', action: 'added', tripId: id, tripName: name, target: name, details: locations.length ? [`Locations: ${locations.map((l) => l.name).join(', ')}`] : [] });
         location.hash = `#/trip/${encodeURIComponent(id)}`;
       } else {
@@ -836,7 +894,7 @@ function changeItem(c) {
 }
 
 function changesSheet() {
-  const list = (store.data.changes || []).slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  const list = allChanges();
   let body;
   if (!list.length) {
     body = '<div class="empty" style="margin:0"><h2>No changes yet</h2><p>Every add, edit and delete from now on shows up here with who made it and when.</p></div>';
@@ -885,69 +943,179 @@ function askName({ welcome = false } = {}) {
 }
 const ensureName = async () => getName() || askName();
 
-function inviteLink() {
-  const code = getTripCode();
-  return `${location.origin}${location.pathname}${code ? `#join=${encodeURIComponent(code)}` : ''}`;
+function allChanges() {
+  const list = [...(store.data.changes || [])];
+  store.data.trips.forEach((t) => list.push(...(t.changes || [])));
+  return list.sort((a, b) => (a.at < b.at ? 1 : -1));
 }
 
-async function shareInvite() {
-  const url = inviteLink();
+const inviteUrl = (code) => `${location.origin}${location.pathname}#join=${encodeURIComponent(code)}`;
+
+async function shareLink(url, text) {
   try {
-    if (navigator.share) { await navigator.share({ title: 'Tasty Trips', text: 'Plan the food for our trip with me', url }); return; }
+    if (navigator.share) { await navigator.share({ title: 'Tasty Trips', text, url }); return; }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   try { await navigator.clipboard.writeText(url); toast('Invite link copied'); } catch { prompt('Copy this invite link', url); }
 }
 
-// ---------------------------------------------------------------- settings / sync
+// ---------------------------------------------------------------- interest
+
+async function toggleLike(foodId) {
+  const name = await ensureName();
+  if (!name) return;
+  const tid = current.tripId;
+  const trip = getTrip(tid);
+  const food = trip && trip.foods.find((f) => f.id === foodId);
+  if (!food) return;
+  const want = !(food.likes || []).includes(name);
+  lastLiked = want ? foodId : null;
+  setTimeout(() => { if (lastLiked === foodId) lastLiked = null; }, 700);
+  store.update((d) => {
+    const t = d.trips.find((x) => x.id === tid);
+    const f = t && t.foods.find((x) => x.id === foodId);
+    if (!f) return;
+    const set = new Set(f.likes || []);
+    if (want) set.add(name); else set.delete(name);
+    f.likes = [...set];
+  }, `${want ? 'Interested in' : 'Not interested in'} ${food.name}`, null, { quiet: true });
+}
+
+// ---------------------------------------------------------------- joining & codes
+
+async function joinWithCode(code) {
+  const had = new Set(store.data.trips.map((t) => t.id));
+  addKey(code);
+  try { await store.load(); } catch (e) { toast(e.message, true); return false; }
+  if (!getKeys().includes(code)) { toast("That code isn't valid", true); refresh(); return false; }
+  const added = store.data.trips.filter((t) => !had.has(t.id));
+  refresh();
+  toast(added.length ? `You joined ${added.map((t) => t.name).join(', ')}` : 'Code added');
+  if (!getName()) setTimeout(() => askName({ welcome: true }), 400);
+  return true;
+}
+
+async function migrateOldData() {
+  try {
+    const res = await fetch(`data/trips.json?t=${Date.now()}`);
+    if (!res.ok) throw new Error('The old data file is gone');
+    const old = await res.json();
+    const trips = (old.trips || []).map((t) => ({
+      ...t,
+      changes: [...(t.changes || []), ...(old.changes || []).filter((c) => c.tripId === t.id)],
+    }));
+    if (!trips.length) throw new Error('The old data file has no trips');
+    await store.importTrips(trips);
+    toast(`Moved ${trips.map((t) => t.name).join(', ')}`);
+  } catch (e) { toast(e.message, true); }
+}
+
+// ---------------------------------------------------------------- invites
+
+function inviteSheet(preselect = []) {
+  const trips = store.data.trips;
+  const body = `
+    <p style="margin:0;color:var(--ink-2)">Create a link that opens only the trips you pick. People with the link can see and edit those trips, and nothing else.</p>
+    <div class="field"><span class="label">Trips</span>
+      <div class="check-list">${trips.map((t) => `
+        <label class="check-row"><input type="checkbox" value="${esc(t.id)}"${preselect.includes(t.id) ? ' checked' : ''}>
+          <span class="grow">${esc(t.name)}</span><span class="hint">${t.foods.length} dishes</span></label>`).join('')}
+      </div></div>
+    <div class="field"><label for="inv-label">Name this invite (optional)</label>
+      <input class="input" id="inv-label" placeholder="e.g. Kyoto crew" maxlength="60" autocomplete="off"></div>
+    <span class="hint err" id="inv-err" hidden></span>
+    <button class="primary-btn" id="inv-create" style="height:44px;align-self:flex-start">${I.userPlusSm}&nbsp;Create invite link</button>
+    <div id="inv-result"></div>
+    <div class="field"><span class="label">Active invites</span><div id="inv-list" class="invite-list"><p class="hint">Loading…</p></div></div>`;
+  openSheet({
+    title: 'Invite people',
+    body,
+    onMount({ el }) {
+      const tripName = (id) => (getTrip(id) || { name: 'Hidden trip' }).name;
+      const renderList = async () => {
+        const box = $('#inv-list', el);
+        try {
+          const list = await store.listInvites();
+          if (!list.length) { box.innerHTML = '<p class="hint">No invites yet.</p>'; return; }
+          box.innerHTML = list.map((i) => `
+            <div class="invite-row" data-code="${esc(i.code)}">
+              <div class="grow">
+                <b>${esc(i.label || 'Invite')}</b>
+                <div class="hint">${esc(i.tripIds.map(tripName).join(', '))}${i.createdBy ? ` · by ${esc(i.createdBy)}` : ''}${i.createdAt ? ` · ${esc(new Date(i.createdAt).toLocaleDateString())}` : ''}</div>
+              </div>
+              <button class="icon-btn" data-inv="share" aria-label="Share this invite link">${I.share}</button>
+              <button class="danger-btn" data-inv="revoke" style="height:40px;padding:0 10px">${I.trash}<span>Revoke</span></button>
+            </div>`).join('');
+          $$('.invite-row', box).forEach((row) => {
+            const code = row.dataset.code;
+            $('[data-inv="share"]', row).addEventListener('click', () => shareLink(inviteUrl(code), 'Plan the food for our trip with me'));
+            twoStepDelete($('[data-inv="revoke"]', row), 'Revoke', async () => {
+              try { await store.revokeInvite(code); toast('Invite revoked'); renderList(); } catch (e) { toast(e.message, true); }
+            });
+          });
+        } catch (e) { box.innerHTML = `<p class="hint err">${esc(e.message)}</p>`; }
+      };
+      renderList();
+      $('#inv-create', el).addEventListener('click', async () => {
+        const err = $('#inv-err', el); err.hidden = true;
+        const ids = $$('.check-row input:checked', el).map((c) => c.value);
+        if (!ids.length) { err.textContent = 'Pick at least one trip.'; err.hidden = false; return; }
+        const btn = $('#inv-create', el); btn.disabled = true;
+        try {
+          const code = await store.createInvite(ids, $('#inv-label', el).value.trim());
+          const url = inviteUrl(code);
+          $('#inv-result', el).innerHTML = `<div class="invite-made">
+            <span class="label">Invite link for ${esc(ids.map(tripName).join(', '))}</span>
+            <input class="input" readonly value="${esc(url)}" aria-label="Invite link">
+            <button class="secondary-btn" id="inv-share">${I.share}Share link</button></div>`;
+          $('#inv-share', el).addEventListener('click', () => shareLink(url, 'Plan the food for our trip with me'));
+          renderList();
+        } catch (e) { err.textContent = e.message; err.hidden = false; }
+        btn.disabled = false;
+      });
+    },
+  });
+}
+
+// ---------------------------------------------------------------- settings
 
 function settingsSheet() {
-  const kind = backendKind();
-  const s = getSettings();
-  const local = store.hasLocalChanges();
+  const shared = store.mode === 'shared';
   const card = (dot, title, sub) => `<span class="dot ${dot}"></span><div><b>${esc(title)}</b><br><span class="hint">${esc(sub)}</span></div>`;
+  const n = store.data.trips.length;
   let status;
-  if (kind === 'shared') {
-    status = store.mode === 'shared'
-      ? card('on', 'Shared with your group', 'Everyone with the invite link can add and edit. Changes save for everyone.')
-      : card('warn', "Can't reach the sync server", store.loadError || 'Check your connection and reload.');
-  } else if (kind === 'github') {
-    status = store.mode === 'github'
-      ? card('on', 'Synced with GitHub', `Edits are committed to ${s.owner}/${s.repo} (${s.branch}).`)
-      : card('warn', "Can't reach GitHub", store.loadError || 'Check your token.');
-  } else {
-    status = card(local ? 'warn' : '', 'Saved on this device only', 'Turn on the shared sync server so friends can edit together (see README).');
+  if (!shared) status = card('', 'Saved on this device only', 'Add the sync server address to config.json to plan together.');
+  else if (store.loadError) status = card('warn', "Can't reach the sync server", store.loadError);
+  else {
+    status = card('on', store.access.admin ? 'You are the trip owner' : 'Shared with your group',
+      store.access.admin ? `You can see all ${n} trip${n === 1 ? '' : 's'} and manage invites.` : `You can see ${n} trip${n === 1 ? '' : 's'}. Changes save for everyone in them.`);
   }
-  const nChanges = (store.data.changes || []).length;
+  const keyLabel = (k) => {
+    if (k.admin) return { title: 'Owner code', sub: 'All trips' };
+    const names = k.tripIds.map((id) => (getTrip(id) || {}).name).filter(Boolean);
+    return { title: k.label || 'Invite', sub: names.join(', ') || 'No trips' };
+  };
   const body = `
     <div class="status-card">${status}</div>
-    ${kind && local ? `<button class="secondary-btn" id="st-push">${I.upload}Upload this browser's edits</button>` : ''}
-    <button class="row-btn" id="st-changes">${I.history}<span class="grow">Track changes</span><span class="count">${nChanges}</span>${I.next}</button>
+    <button class="row-btn" id="st-changes">${I.history}<span class="grow">Track changes</span><span class="count">${allChanges().length}</span>${I.next}</button>
+    ${shared && store.access.keys.length ? `<button class="row-btn" id="st-invite">${I.userPlusSm}<span class="grow">Invite people</span>${I.next}</button>` : ''}
     <div class="field"><label for="st-name">Your name</label>
-      <input class="input" id="st-name" value="${esc(getName())}" placeholder="Shown next to your changes" maxlength="40" autocomplete="given-name"></div>
-    ${kind === 'shared' ? `
-      <div class="field"><label for="st-code">Trip code</label>
-        <input class="input" id="st-code" type="password" value="${esc(getTripCode())}" placeholder="From the invite link" autocomplete="off" autocapitalize="off">
-        <span class="hint">Needed to make changes. Opening the invite link fills it in.</span></div>
-      <button class="secondary-btn" id="st-invite" style="align-self:flex-start">${I.share}Share invite link</button>` : `
-      <details class="adv"${kind === 'github' ? ' open' : ''}>
-        <summary>Trip owner: sync with a GitHub token</summary>
-        <div class="field"><span class="label">GitHub repository</span>
-          <div class="price-row">
-            <input class="input" id="st-owner" value="${esc(s.owner)}" placeholder="owner" aria-label="Owner" autocomplete="off" autocapitalize="off">
-            <span style="color:var(--muted)">/</span>
-            <input class="input" id="st-repo" value="${esc(s.repo)}" placeholder="repository" aria-label="Repository" autocomplete="off" autocapitalize="off">
-          </div></div>
-        <div class="field"><label for="st-branch">Branch</label>
-          <input class="input" id="st-branch" value="${esc(s.branch)}" autocomplete="off" autocapitalize="off"></div>
-        <div class="field"><label for="st-token">Access token</label>
-          <input class="input" id="st-token" type="password" value="${esc(s.token)}" placeholder="github_pat_…" autocomplete="off">
-          <span class="hint">Only for you. Friends don't need this once the shared sync server is set up.</span></div>
-        ${kind === 'github' ? '<button class="secondary-btn" id="st-disconnect" type="button">Disconnect</button>' : ''}
-      </details>`}
-    <span class="hint err" id="st-err" hidden></span>
+      <input class="input" id="st-name" value="${esc(getName())}" placeholder="Shown next to your changes and hearts" maxlength="40" autocomplete="given-name">
+      ${getName() ? '<span class="hint">Changing it won\'t move hearts you already gave under your old name.</span>' : ''}</div>
+    ${shared ? `
+      <div class="field"><span class="label">Your access codes</span>
+        <div class="invite-list">${store.access.keys.length ? store.access.keys.map((k) => {
+    const l = keyLabel(k);
+    return `<div class="invite-row" data-code="${esc(k.code)}">${I.key}<div class="grow"><b>${esc(l.title)}</b><div class="hint">${esc(l.sub)}</div></div>
+            <button class="icon-btn" data-key="remove" aria-label="Remove this code from this device">${I.x}</button></div>`;
+  }).join('') : '<p class="hint">None yet. Open an invite link or add a code below.</p>'}</div>
+        <div class="join-row" style="margin:0;max-width:none">
+          <input class="input" id="st-code" placeholder="Invite or owner code" autocomplete="off" autocapitalize="off" aria-label="Add a code">
+          <button class="secondary-btn" id="st-add-code" type="button">Add</button>
+        </div></div>
+      ${store.access.admin ? `<button class="secondary-btn" id="st-migrate" style="align-self:flex-start">${I.upload}Move trips from the old data file</button>` : ''}` : ''}
     <div class="btn-row">
       <button class="secondary-btn" id="st-export">${I.download}Export data</button>
-      <label class="secondary-btn" style="cursor:pointer">${I.upload}Import data<input type="file" accept="application/json,.json" id="st-import" class="sr-only"></label>
+      ${!shared || store.access.admin ? `<label class="secondary-btn" style="cursor:pointer">${I.upload}Import data<input type="file" accept="application/json,.json" id="st-import" class="sr-only"></label>` : ''}
     </div>`;
   openSheet({
     title: 'Sync & settings',
@@ -955,78 +1123,45 @@ function settingsSheet() {
     onMount({ el, close }) {
       $('#st-changes', el).addEventListener('click', changesSheet);
       const inv = $('#st-invite', el);
-      inv && inv.addEventListener('click', () => { const c = $('#st-code', el).value.trim(); if (c) setTripCode(c); shareInvite(); });
-      const push = $('#st-push', el);
-      push && push.addEventListener('click', async () => {
-        try { await store.pushLocal(); toast('Uploaded'); close(); refresh(); } catch (e) { toast(e.message, true); }
+      inv && inv.addEventListener('click', () => inviteSheet(current.tripId ? [current.tripId] : []));
+      $$('[data-key="remove"]', el).forEach((b) => b.addEventListener('click', async () => {
+        removeKey(b.closest('.invite-row').dataset.code);
+        close();
+        try { await store.load(); } catch { /* ignore */ }
+        refresh(); toast('Code removed from this device');
+      }));
+      const addBtn = $('#st-add-code', el);
+      addBtn && addBtn.addEventListener('click', async () => {
+        const code = $('#st-code', el).value.trim();
+        if (!code) return;
+        if (await joinWithCode(code)) close();
       });
-      const dis = $('#st-disconnect', el);
-      dis && dis.addEventListener('click', async () => {
-        saveSettings({ ...getSettings(), token: '' });
-        close(); await store.load(); refresh(); toast('Disconnected from GitHub');
-      });
+      const mig = $('#st-migrate', el);
+      mig && mig.addEventListener('click', async () => { close(); await migrateOldData(); });
       $('#st-export', el).addEventListener('click', () => {
         const blob = new Blob([JSON.stringify(store.data, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob); a.download = 'trips.json'; a.click();
         setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       });
-      $('#st-import', el).addEventListener('change', async (e) => {
+      const imp = $('#st-import', el);
+      imp && imp.addEventListener('change', async (e) => {
         const file = e.target.files[0]; if (!file) return;
         try {
           const data = JSON.parse(await file.text());
           if (!data || !Array.isArray(data.trips)) throw new Error('Not a Tasty Trips file');
-          if (!(await ensureName())) return;
           close();
-          store.replaceAll(data, 'Import trips', { kind: 'data', action: 'imported', target: file.name, details: [`${data.trips.length} trip(s)`] });
+          if (shared) await store.importTrips(data.trips);
+          else store.update((d) => { d.trips = JSON.parse(JSON.stringify(data.trips)); }, 'Import trips');
           toast('Imported');
         } catch (er) { toast(`Import failed: ${er.message}`, true); }
       });
     },
-    async onSave({ el }) {
-      const err = $('#st-err', el);
-      const showErr = (m) => { err.textContent = m; err.hidden = false; return false; };
+    onSave({ el }) {
       const name = $('#st-name', el).value.trim();
-      if (name) setName(name);
-      const btn = $('[data-sheet="save"]', el);
-      if (kind === 'shared') {
-        const code = $('#st-code', el).value.trim();
-        const prev = getTripCode();
-        setTripCode(code);
-        btn.disabled = true; btn.textContent = 'Checking…';
-        try {
-          await testConnection();
-          if (store.mode !== 'shared') await store.load();
-          refresh(); toast('Saved');
-          return true;
-        } catch (e) {
-          setTripCode(prev); btn.disabled = false; btn.textContent = 'Save';
-          return showErr(e.status === 401 ? 'That trip code is not right.' : e.message);
-        }
-      }
-      const next = {
-        owner: $('#st-owner', el).value.trim(), repo: $('#st-repo', el).value.trim(),
-        branch: $('#st-branch', el).value.trim() || 'main', token: $('#st-token', el).value.trim(),
-      };
-      const prev = getSettings();
-      if (!next.token || (next.token === prev.token && next.owner === prev.owner && next.repo === prev.repo && next.branch === prev.branch)) {
-        refresh(); return true;
-      }
-      if (!next.owner || !next.repo) return showErr('Fill in the repository.');
-      const hadLocal = store.hasLocalChanges();
-      saveSettings(next);
-      btn.disabled = true; btn.textContent = 'Checking…';
-      try {
-        const info = await testConnection();
-        await store.load();
-        refresh();
-        toast(`Connected to ${info.repo}${hadLocal ? '. Open this panel to upload your browser edits.' : ''}`);
-        return true;
-      } catch (e) {
-        saveSettings(prev);
-        btn.disabled = false; btn.textContent = 'Save';
-        return showErr(e.status === 401 ? 'That token was rejected by GitHub.' : e.status === 404 ? 'Repository or branch not found for this token.' : e.message);
-      }
+      if (name && name !== getName()) { setName(name); toast('Name saved'); }
+      refresh();
+      return true;
     },
   });
 }
@@ -1034,7 +1169,7 @@ function settingsSheet() {
 // ---------------------------------------------------------------- events
 
 document.addEventListener('click', (e) => {
-  const a = e.target.closest('a.food-card');
+  const a = e.target.closest('a.card-link');
   if (a) detailOpenedInApp = true;
   const b = e.target.closest('[data-action]');
   if (!b) return;
@@ -1042,6 +1177,16 @@ document.addEventListener('click', (e) => {
   const trip = current.tripId && getTrip(current.tripId);
   switch (action) {
     case 'settings': settingsSheet(); break;
+    case 'invite': inviteSheet(trip ? [trip.id] : []); break;
+    case 'migrate': migrateOldData(); break;
+    case 'like': toggleLike(b.dataset.food); break;
+    case 'sort': {
+      if (ui.sort === b.dataset.value) break;
+      ui.sort = b.dataset.value; lsSet('tt.sort', ui.sort);
+      pressOnly(b.parentElement, b);
+      refreshGroups(trip);
+      break;
+    }
     case 'new-trip': tripForm(null); break;
     case 'edit-trip': tripForm(trip); break;
     case 'add-loc': tripForm(trip, { addLocation: true }); break;
@@ -1100,6 +1245,13 @@ document.addEventListener('click', (e) => {
   }
 });
 
+document.addEventListener('submit', async (e) => {
+  if (e.target.id !== 'join-form') return;
+  e.preventDefault();
+  const code = $('#join-code').value.trim();
+  if (code) await joinWithCode(code);
+});
+
 document.addEventListener('input', (e) => {
   if (e.target.id === 'food-search') {
     ui.q = e.target.value;
@@ -1116,7 +1268,8 @@ document.addEventListener('keydown', (e) => {
 
 // ---------------------------------------------------------------- boot
 
-store.onSaved = (where) => toast(where === 'shared' ? 'Saved for everyone' : where === 'github' ? 'Saved to GitHub' : 'Saved on this device');
+store.onSaved = (where, opts = {}) => { if (!opts.quiet) toast(where === 'shared' ? 'Saved for everyone' : 'Saved on this device'); };
+store.onRenamed = (from, to) => { if (current.tripId === from) location.replace(`#/trip/${encodeURIComponent(to)}`); };
 store.onError = (e) => { toast(`Not saved: ${e.message}`, true); };
 store.on(refresh);
 
@@ -1124,7 +1277,7 @@ store.on(refresh);
 function readJoinLink() {
   const m = location.hash.match(/[#&?/]join=([^&]+)/);
   if (!m) return false;
-  setTripCode(decodeURIComponent(m[1]));
+  addKey(decodeURIComponent(m[1]));
   history.replaceState(null, '', `${location.pathname}${location.search}#/`);
   return true;
 }
@@ -1132,15 +1285,18 @@ function readJoinLink() {
 (async function boot() {
   $('#app').innerHTML = '<div class="loading"><div class="spinner" aria-label="Loading"></div></div>';
   const joined = readJoinLink();
+  const before = getKeys().length;
   try {
     await loadConfig();
     await store.load();
   } catch (e) {
-    $('#app').innerHTML = `<main class="page"><div class="empty"><h2>Couldn't load trips</h2><p>${esc(e.message)}</p></div></main>`;
+    $('#app').innerHTML = `<main class="page"><div class="empty"><h2>Couldn't load trips</h2><p>${esc(e.message)}</p>
+      <button class="secondary-btn" style="margin-top:16px" onclick="location.reload()">Try again</button></div></main>`;
     return;
   }
   route();
   if (document.fonts) document.fonts.ready.then(() => syncSegmented(document, false));
-  if (!getName() && (joined || backendKind() === 'shared')) setTimeout(() => askName({ welcome: true }), 500);
+  if (joined && getKeys().length < before) toast("That invite link isn't valid any more", true);
+  else if (!getName() && isConnected() && store.data.trips.length) setTimeout(() => askName({ welcome: true }), 500);
   else if (joined) toast('You joined the trip');
 }());

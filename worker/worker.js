@@ -1,100 +1,205 @@
-// Tasty Trips sync server — a Cloudflare Worker (free plan is plenty).
+// Tasty Trips sync server — a Cloudflare Worker with a D1 database (free plan is plenty).
 //
-// It keeps the GitHub token secret and lets everyone with the trip code edit
-// data/trips.json (and add photos to images/) without a GitHub account.
+// Trips are stored privately in D1. Each trip is only visible to people holding
+// an invite code for it; the owner code (ADMIN_CODE) sees and manages everything.
 //
-// Settings → Variables and Secrets:
-//   GITHUB_TOKEN   (secret) fine-grained token, this repo only, Contents: Read and write
-//   TRIP_PASSCODE  (secret) the code friends need to edit; leave unset to let anyone edit
-//   OWNER          (text)   e.g. githintz
-//   REPO           (text)   e.g. TastyTripsPlanner
-//   BRANCH         (text)   the branch GitHub Pages deploys from, e.g. main
-//   ALLOWED_ORIGIN (text, optional) e.g. https://githintz.github.io
+// Setup (Worker → Settings):
+//   Bindings → D1 database, variable name: DB
+//   Variables and Secrets:
+//     ADMIN_CODE     (secret) your owner code — keep it to yourself
+//     ALLOWED_ORIGIN (text, optional) e.g. https://githintz.github.io
 
-const DATA_PATH = 'data/trips.json';
-const MAX_DATA = 5 * 1024 * 1024;
-const MAX_IMAGE = 4 * 1024 * 1024;
+const MAX_TRIP = 1_000_000;      // bytes of JSON per trip
+const MAX_IMAGE = 1_400_000;     // bytes per photo
+const CODE_ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+let ready = false;
+async function init(db) {
+  if (ready) return;
+  await db.batch([
+    db.prepare('CREATE TABLE IF NOT EXISTS trips (id TEXT PRIMARY KEY, data TEXT NOT NULL, version INTEGER NOT NULL, updated_at TEXT)'),
+    db.prepare('CREATE TABLE IF NOT EXISTS invites (code TEXT PRIMARY KEY, label TEXT, trip_ids TEXT NOT NULL, created_by TEXT, created_at TEXT)'),
+    db.prepare('CREATE TABLE IF NOT EXISTS images (name TEXT PRIMARY KEY, type TEXT, data TEXT NOT NULL, created_at TEXT)'),
+  ]);
+  ready = true;
+}
+
+function randomCode(n = 10) {
+  const bytes = crypto.getRandomValues(new Uint8Array(n));
+  return Array.from(bytes, (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
+}
+const slug = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'trip';
+const clean = (s, n = 60) => String(s || '').replace(/[<>\n\r]/g, '').trim().slice(0, n);
+const now = () => new Date().toISOString();
+
+async function access(env, request) {
+  const keys = (request.headers.get('X-Trip-Keys') || '').split(',').map((k) => k.trim()).filter(Boolean).slice(0, 30);
+  const admin = !!env.ADMIN_CODE && keys.includes(env.ADMIN_CODE);
+  const tripIds = new Set();
+  const keyInfo = [];
+  const inviteKeys = keys.filter((k) => k !== env.ADMIN_CODE);
+  if (inviteKeys.length) {
+    const rows = await env.DB.prepare(`SELECT code, label, trip_ids FROM invites WHERE code IN (${inviteKeys.map(() => '?').join(',')})`)
+      .bind(...inviteKeys).all();
+    for (const r of rows.results) {
+      const ids = JSON.parse(r.trip_ids);
+      ids.forEach((id) => tripIds.add(id));
+      keyInfo.push({ code: r.code, admin: false, label: r.label || '', tripIds: ids });
+    }
+  }
+  if (admin) keyInfo.unshift({ code: env.ADMIN_CODE, admin: true, label: 'Owner code', tripIds: [] });
+  return { admin, keyInfo, valid: keyInfo.length > 0, can: (id) => admin || tripIds.has(id), tripIds };
+}
 
 export default {
   async fetch(request, env) {
     const cors = {
       'Access-Control-Allow-Origin': env.ALLOWED_ORIGIN || '*',
-      'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, X-Trip-Key',
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, X-Trip-Keys',
       'Access-Control-Max-Age': '86400',
     };
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
-
     const json = (body, status = 200) => new Response(JSON.stringify(body), {
       status, headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
     });
-
-    if (!env.GITHUB_TOKEN || !env.OWNER || !env.REPO) return json({ error: 'Sync server is not configured yet' }, 500);
+    if (!env.DB) return json({ error: 'Sync server is missing its D1 database (binding DB)' }, 500);
+    if (!env.ADMIN_CODE) return json({ error: 'Sync server is missing ADMIN_CODE' }, 500);
 
     const url = new URL(request.url);
-    const branch = env.BRANCH || 'main';
-    const keyOk = !env.TRIP_PASSCODE || request.headers.get('X-Trip-Key') === env.TRIP_PASSCODE;
-
-    const gh = async (path, init = {}) => {
-      const res = await fetch(`https://api.github.com/repos/${env.OWNER}/${env.REPO}/${path}`, {
-        ...init,
-        headers: {
-          Accept: 'application/vnd.github+json',
-          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'tasty-trips-sync',
-          ...(init.headers || {}),
-        },
-      });
-      let body = null;
-      try { body = await res.json(); } catch { /* empty */ }
-      return { ok: res.ok, status: res.status, body };
-    };
-    const fail = (r) => json({ error: (r.body && r.body.message) || 'GitHub error' }, r.status === 409 ? 409 : r.status || 502);
-    const authorOf = (a) => (a && a.name
-      ? { name: String(a.name).replace(/[<>\n\r]/g, '').slice(0, 40) || 'Someone', email: 'tasty-trips@users.noreply.github.com' }
-      : undefined);
+    const parts = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    const method = request.method;
+    const db = env.DB;
 
     try {
-      if (url.pathname === '/check') {
-        if (!keyOk) return json({ error: 'Wrong trip code' }, 401);
-        return json({ ok: true, repo: `${env.OWNER}/${env.REPO}`, branch });
+      await init(db);
+
+      // Public: photos (names are long random strings).
+      if (parts[0] === 'img' && parts[1] && method === 'GET') {
+        const row = await db.prepare('SELECT type, data FROM images WHERE name = ?').bind(parts[1]).first();
+        if (!row) return new Response('Not found', { status: 404, headers: cors });
+        const bin = atob(row.data);
+        const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+        return new Response(bytes, { headers: { ...cors, 'Content-Type': row.type || 'image/jpeg', 'Cache-Control': 'public, max-age=31536000, immutable' } });
       }
 
-      if (url.pathname === '/data' && request.method === 'GET') {
-        const r = await gh(`contents/${DATA_PATH}?ref=${encodeURIComponent(branch)}`);
-        if (!r.ok) return fail(r);
-        return json({ content: r.body.content, sha: r.body.sha });
-      }
+      const who = await access(env, request);
+      const body = ['POST', 'PUT'].includes(method) ? await request.json().catch(() => ({})) : {};
 
-      if (!keyOk) return json({ error: 'Wrong trip code' }, 401);
-
-      if (url.pathname === '/data' && request.method === 'PUT') {
-        const { content, sha, message, author } = await request.json();
-        if (typeof content !== 'string' || content.length > MAX_DATA * 1.4) return json({ error: 'Invalid data' }, 400);
-        // Only accept a well-formed trips file.
-        const text = new TextDecoder().decode(Uint8Array.from(atob(content), (c) => c.charCodeAt(0)));
-        const parsed = JSON.parse(text);
-        if (!parsed || !Array.isArray(parsed.trips)) return json({ error: 'Invalid data' }, 400);
-        const r = await gh(`contents/${DATA_PATH}`, {
-          method: 'PUT',
-          body: JSON.stringify({
-            message: String(message || 'Update trips').slice(0, 200),
-            content, sha, branch, author: authorOf(author),
-          }),
+      // ---- trips
+      if (parts[0] === 'trips' && parts.length === 1 && method === 'GET') {
+        const rows = who.admin
+          ? await db.prepare('SELECT id, data, version FROM trips ORDER BY updated_at').all()
+          : who.tripIds.size
+            ? await db.prepare(`SELECT id, data, version FROM trips WHERE id IN (${[...who.tripIds].map(() => '?').join(',')}) ORDER BY updated_at`).bind(...who.tripIds).all()
+            : { results: [] };
+        const all = who.admin ? await db.prepare('SELECT COUNT(*) AS n FROM trips').first() : null;
+        return json({
+          admin: who.admin,
+          keys: who.keyInfo,
+          empty: who.admin ? all.n === 0 : undefined,
+          trips: rows.results.map((r) => ({ id: r.id, version: r.version, data: JSON.parse(r.data) })),
         });
-        return r.ok ? json({ sha: r.body.content.sha }) : fail(r);
       }
 
-      if (url.pathname === '/image' && request.method === 'PUT') {
-        const { name, content, author } = await request.json();
-        if (!/^[a-z0-9][a-z0-9-]{0,80}\.jpg$/.test(String(name))) return json({ error: 'Invalid file name' }, 400);
-        if (typeof content !== 'string' || content.length > MAX_IMAGE * 1.4) return json({ error: 'Photo too large' }, 413);
-        const r = await gh(`contents/images/${name}`, {
-          method: 'PUT',
-          body: JSON.stringify({ message: `Add photo ${name}`, content, branch, author: authorOf(author) }),
+      if (parts[0] === 'trips' && parts.length === 1 && method === 'POST') {
+        if (!who.valid) return json({ error: 'You need an invite code to create trips' }, 403);
+        const data = body.data;
+        if (!data || typeof data !== 'object') return json({ error: 'Invalid trip' }, 400);
+        let id = slug(data.id || data.name); let n = 2;
+        while (await db.prepare('SELECT 1 FROM trips WHERE id = ?').bind(id).first()) id = `${slug(data.id || data.name)}-${n++}`;
+        data.id = id;
+        const text = JSON.stringify(data);
+        if (text.length > MAX_TRIP) return json({ error: 'Trip is too large' }, 413);
+        await db.prepare('INSERT INTO trips (id, data, version, updated_at) VALUES (?, ?, 1, ?)').bind(id, text, now()).run();
+        let invite = null;
+        if (!who.admin) {
+          invite = randomCode();
+          await db.prepare('INSERT INTO invites (code, label, trip_ids, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
+            .bind(invite, `${clean(data.name, 40)} (creator)`, JSON.stringify([id]), clean(body.by, 40), now()).run();
+        }
+        return json({ id, version: 1, invite });
+      }
+
+      if (parts[0] === 'trips' && parts[1]) {
+        const id = parts[1];
+        if (!who.can(id)) return json({ error: 'You do not have access to this trip' }, 403);
+        if (method === 'PUT') {
+          const data = body.data;
+          if (!data || data.id !== id) return json({ error: 'Invalid trip' }, 400);
+          const text = JSON.stringify(data);
+          if (text.length > MAX_TRIP) return json({ error: 'Trip is too large' }, 413);
+          const r = await db.prepare('UPDATE trips SET data = ?, version = version + 1, updated_at = ? WHERE id = ? AND version = ?')
+            .bind(text, now(), id, Number(body.version)).run();
+          if (!r.meta.changes) {
+            const exists = await db.prepare('SELECT version FROM trips WHERE id = ?').bind(id).first();
+            return json({ error: exists ? 'Trip changed in the meantime' : 'Trip not found' }, exists ? 409 : 404);
+          }
+          return json({ version: Number(body.version) + 1 });
+        }
+        if (method === 'DELETE') {
+          if (!who.admin) return json({ error: 'Only the trip owner can delete trips' }, 403);
+          await db.prepare('DELETE FROM trips WHERE id = ?').bind(id).run();
+          const inv = await db.prepare('SELECT code, trip_ids FROM invites').all();
+          for (const r of inv.results) {
+            const ids = JSON.parse(r.trip_ids).filter((x) => x !== id);
+            if (!ids.length) await db.prepare('DELETE FROM invites WHERE code = ?').bind(r.code).run();
+            else await db.prepare('UPDATE invites SET trip_ids = ? WHERE code = ?').bind(JSON.stringify(ids), r.code).run();
+          }
+          return json({ ok: true });
+        }
+      }
+
+      // ---- invites
+      const visibleInvite = (ids) => who.admin || ids.every((id) => who.tripIds.has(id));
+      if (parts[0] === 'invites' && parts.length === 1 && method === 'GET') {
+        if (!who.valid) return json({ invites: [] });
+        const rows = await db.prepare('SELECT code, label, trip_ids, created_by, created_at FROM invites ORDER BY created_at DESC').all();
+        return json({
+          invites: rows.results.map((r) => ({ code: r.code, label: r.label, tripIds: JSON.parse(r.trip_ids), createdBy: r.created_by, createdAt: r.created_at }))
+            .filter((i) => visibleInvite(i.tripIds)),
         });
-        return r.ok ? json({ path: `images/${name}` }) : fail(r);
+      }
+      if (parts[0] === 'invites' && parts.length === 1 && method === 'POST') {
+        const ids = Array.isArray(body.tripIds) ? [...new Set(body.tripIds.map(String))].slice(0, 50) : [];
+        if (!ids.length) return json({ error: 'Pick at least one trip' }, 400);
+        if (!ids.every((id) => who.can(id))) return json({ error: 'You can only invite people to trips you have access to' }, 403);
+        const code = randomCode();
+        await db.prepare('INSERT INTO invites (code, label, trip_ids, created_by, created_at) VALUES (?, ?, ?, ?, ?)')
+          .bind(code, clean(body.label), JSON.stringify(ids), clean(body.by, 40), now()).run();
+        return json({ code });
+      }
+      if (parts[0] === 'invites' && parts[1] && method === 'DELETE') {
+        const row = await db.prepare('SELECT trip_ids FROM invites WHERE code = ?').bind(parts[1]).first();
+        if (!row) return json({ ok: true });
+        if (!visibleInvite(JSON.parse(row.trip_ids))) return json({ error: 'Not allowed' }, 403);
+        await db.prepare('DELETE FROM invites WHERE code = ?').bind(parts[1]).run();
+        return json({ ok: true });
+      }
+
+      // ---- photos
+      if (parts[0] === 'images' && method === 'POST') {
+        if (!who.valid) return json({ error: 'You need an invite code to upload photos' }, 403);
+        const content = String(body.content || '');
+        if (!content || content.length > MAX_IMAGE * 1.37) return json({ error: 'Photo too large' }, 413);
+        const type = /^image\/(jpeg|png|webp)$/.test(body.type) ? body.type : 'image/jpeg';
+        const name = `${randomCode(16)}.${type.split('/')[1].replace('jpeg', 'jpg')}`;
+        await db.prepare('INSERT INTO images (name, type, data, created_at) VALUES (?, ?, ?, ?)').bind(name, type, content, now()).run();
+        return json({ url: `${url.origin}/img/${name}` });
+      }
+
+      // ---- one-time move of existing trips (owner only)
+      if (parts[0] === 'import' && method === 'POST') {
+        if (!who.admin) return json({ error: 'Only the owner can import' }, 403);
+        const trips = Array.isArray(body.trips) ? body.trips : [];
+        for (const t of trips) {
+          if (!t || !t.id) continue;
+          const text = JSON.stringify(t);
+          if (text.length > MAX_TRIP) continue;
+          await db.prepare('INSERT INTO trips (id, data, version, updated_at) VALUES (?, ?, 1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data, version = trips.version + 1, updated_at = excluded.updated_at')
+            .bind(slug(t.id), JSON.stringify({ ...t, id: slug(t.id) }), now()).run();
+        }
+        return json({ ok: true, count: trips.length });
       }
 
       return json({ error: 'Not found' }, 404);

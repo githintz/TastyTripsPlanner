@@ -1,16 +1,12 @@
-// Data store: loads trips.json, applies edits, logs who changed what, and saves
-// through one of three backends:
-//   1. "shared"  – the Tasty Trips sync server (worker/worker.js). Holds the
-//                  GitHub token itself; friends only need the invite link.
-//   2. "github"  – direct GitHub API calls with a personal token (owner only).
-//   3. "local"   – this browser only.
+// Data store. Trips live on the Tasty Trips sync server (worker/worker.js),
+// which only returns the trips your codes unlock. Without a sync server
+// (no config.json syncUrl) everything is kept in this browser.
 
-const DATA_PATH = 'data/trips.json';
-const LS_SETTINGS = 'tt.github';
 const LS_LOCAL = 'tt.localData';
 const LS_NAME = 'tt.name';
-const LS_CODE = 'tt.tripCode';
-const MAX_CHANGES = 500;
+const LS_KEYS = 'tt.keys';
+const LS_LEGACY_CODE = 'tt.tripCode';
+const MAX_CHANGES = 300;
 
 export const CATEGORIES = [
   { id: 'main', label: 'Main course' },
@@ -29,13 +25,26 @@ function lsGet(key, fallback = '') { try { return localStorage.getItem(key) ?? f
 function lsSet(key, v) { try { if (v === null || v === undefined || v === '') localStorage.removeItem(key); else localStorage.setItem(key, v); } catch { /* ignore */ } }
 function readJSON(key, fallback) { try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } }
 function writeJSON(key, value) { lsSet(key, value === null || value === undefined ? null : JSON.stringify(value)); }
+const clone = (x) => JSON.parse(JSON.stringify(x));
 
-// ---------------------------------------------------------------- identity
+// ---------------------------------------------------------------- identity & codes
 
 export const getName = () => lsGet(LS_NAME, '').trim();
 export const setName = (n) => lsSet(LS_NAME, String(n || '').trim().slice(0, 40));
-export const getTripCode = () => lsGet(LS_CODE, '');
-export const setTripCode = (c) => lsSet(LS_CODE, String(c || '').trim());
+
+export function getKeys() {
+  const keys = readJSON(LS_KEYS, []);
+  const legacy = lsGet(LS_LEGACY_CODE, '');
+  if (legacy) { lsSet(LS_LEGACY_CODE, null); if (!keys.includes(legacy)) keys.push(legacy); writeJSON(LS_KEYS, keys); }
+  return keys;
+}
+export function addKey(code) {
+  const c = String(code || '').trim();
+  if (!c) return;
+  const keys = getKeys();
+  if (!keys.includes(c)) { keys.push(c); writeJSON(LS_KEYS, keys); }
+}
+export function removeKey(code) { writeJSON(LS_KEYS, getKeys().filter((k) => k !== code)); }
 
 // ---------------------------------------------------------------- config
 
@@ -49,249 +58,189 @@ export async function loadConfig() {
   return config;
 }
 export const getConfig = () => config;
+export const backendKind = () => (config.syncUrl ? 'shared' : null);
+export const isConnected = () => !!config.syncUrl;
 
-/** Guess owner/repo from a GitHub Pages URL like owner.github.io/repo/. */
-function guessRepo() {
-  const m = location.hostname.match(/^([^.]+)\.github\.io$/i);
-  if (!m) return { owner: '', repo: '' };
-  const first = location.pathname.split('/').filter(Boolean)[0];
-  return { owner: m[1], repo: first || `${m[1]}.github.io` };
+// ---------------------------------------------------------------- server calls
+
+class HttpError extends Error { constructor(msg, status) { super(msg); this.status = status; } }
+
+async function api(path, { method = 'GET', body } = {}) {
+  let res;
+  try {
+    res = await fetch(`${config.syncUrl}${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'X-Trip-Keys': getKeys().join(',') },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      cache: 'no-store',
+    });
+  } catch { throw new HttpError("Can't reach the sync server", 0); }
+  let j = null;
+  try { j = await res.json(); } catch { /* empty */ }
+  if (!res.ok) throw new HttpError((j && j.error) || res.statusText, res.status);
+  return j;
 }
-
-export function getSettings() {
-  const g = guessRepo();
-  const s = readJSON(LS_SETTINGS, {});
-  return { owner: s.owner || g.owner, repo: s.repo || g.repo, branch: s.branch || 'main', token: s.token || '' };
-}
-export function saveSettings(s) { writeJSON(LS_SETTINGS, s); }
-
-/** 'shared' | 'github' | null */
-export function backendKind() {
-  if (config.syncUrl) return 'shared';
-  const s = getSettings();
-  if (s.token && s.owner && s.repo) return 'github';
-  return null;
-}
-export const isConnected = () => !!backendKind();
-
-// ---------------------------------------------------------------- base64 (UTF-8 safe)
 
 function bytesToB64(bytes) {
   let bin = '';
   for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(bin);
 }
-const toBase64 = (str) => bytesToB64(new TextEncoder().encode(str));
-function fromBase64(b64) {
-  const bin = atob(String(b64).replace(/\n/g, ''));
-  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
-}
-
-class HttpError extends Error {
-  constructor(msg, status) { super(msg); this.status = status; }
-}
-
-async function req(url, opts, label) {
-  let res;
-  try { res = await fetch(url, opts); } catch { throw new HttpError(`${label}: can't reach the server`, 0); }
-  let body = null;
-  try { body = await res.json(); } catch { /* empty */ }
-  if (!res.ok) {
-    const msg = (body && (body.error || body.message)) || res.statusText;
-    throw new HttpError(res.status === 401 ? 'Wrong trip code' : `${label}: ${msg}`, res.status);
-  }
-  return body;
-}
-
-const author = () => (getName() ? { name: getName() } : null);
-
-// ---- shared sync server
-const shared = {
-  headers() { return { 'Content-Type': 'application/json', 'X-Trip-Key': getTripCode() }; },
-  async get() {
-    const j = await req(`${config.syncUrl}/data?t=${Date.now()}`, { headers: this.headers() }, 'Sync');
-    return { data: JSON.parse(fromBase64(j.content)), sha: j.sha };
-  },
-  async put(data, sha, message) {
-    const j = await req(`${config.syncUrl}/data`, {
-      method: 'PUT', headers: this.headers(),
-      body: JSON.stringify({ content: toBase64(JSON.stringify(data, null, 2) + '\n'), sha, message, author: author() }),
-    }, 'Sync');
-    return j.sha;
-  },
-  async image(name, b64) {
-    const j = await req(`${config.syncUrl}/image`, {
-      method: 'PUT', headers: this.headers(), body: JSON.stringify({ name, content: b64, author: author() }),
-    }, 'Sync');
-    return j.path;
-  },
-  async check() { return req(`${config.syncUrl}/check`, { headers: this.headers() }, 'Sync'); },
-};
-
-// ---- direct GitHub (owner with a personal token)
-const github = {
-  async call(path, opts = {}) {
-    const s = getSettings();
-    return req(`https://api.github.com/repos/${s.owner}/${s.repo}/${path}`, {
-      ...opts,
-      headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${s.token}`, 'X-GitHub-Api-Version': '2022-11-28', ...(opts.headers || {}) },
-    }, 'GitHub');
-  },
-  authorObj() { const a = author(); return a ? { name: a.name, email: 'tasty-trips@users.noreply.github.com' } : undefined; },
-  async get() {
-    const j = await this.call(`contents/${DATA_PATH}?ref=${encodeURIComponent(getSettings().branch)}&t=${Date.now()}`);
-    return { data: JSON.parse(fromBase64(j.content)), sha: j.sha };
-  },
-  async put(data, sha, message) {
-    const j = await this.call(`contents/${DATA_PATH}`, {
-      method: 'PUT',
-      body: JSON.stringify({ message, content: toBase64(JSON.stringify(data, null, 2) + '\n'), sha, branch: getSettings().branch, author: this.authorObj() }),
-    });
-    return j.content.sha;
-  },
-  async image(name, b64) {
-    const path = `images/${name}`;
-    await this.call(`contents/${path}`, { method: 'PUT', body: JSON.stringify({ message: `Add photo ${name}`, content: b64, branch: getSettings().branch, author: this.authorObj() }) });
-    return path;
-  },
-  async check() {
-    const repo = await this.call('');
-    if (!repo.permissions || !repo.permissions.push) throw new Error('This token can read the repo but not write to it.');
-    await this.call(`branches/${encodeURIComponent(getSettings().branch)}`);
-    return { repo: repo.full_name, branch: getSettings().branch };
-  },
-};
-
-const backend = () => ({ shared, github }[backendKind()] || null);
-export const testConnection = () => backend().check();
 
 // ---------------------------------------------------------------- store
 
 class Store {
   constructor() {
-    this.data = null;
-    this.sha = null;
-    this.mode = 'static'; // 'shared' | 'github' | 'local' | 'static'
+    this.data = { trips: [] };
+    this.versions = {};
+    this.access = { admin: false, keys: [], empty: false };
+    this.mode = 'local'; // 'shared' | 'local'
+    this.loadError = '';
     this.listeners = new Set();
     this.saving = Promise.resolve();
-    this.loadError = '';
   }
 
   on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
   emit() { this.listeners.forEach((fn) => fn()); }
 
-  async load() {
-    this.loadError = '';
-    const b = backend();
-    if (b) {
-      try {
-        const { data, sha } = await b.get();
-        this.data = data; this.sha = sha; this.mode = backendKind();
-        return;
-      } catch (e) {
-        console.warn('Remote load failed, falling back', e);
-        this.loadError = e.message;
-      }
+  async fetchShared() {
+    const j = await api('/trips');
+    // Forget codes the server no longer recognises (e.g. revoked invites).
+    if (getKeys().length && j.keys) {
+      const ok = new Set(j.keys.map((k) => k.code));
+      getKeys().filter((k) => !ok.has(k)).forEach(removeKey);
     }
-    const local = readJSON(LS_LOCAL, null);
-    if (local) { this.data = local; this.mode = 'local'; return; }
-    const res = await fetch(`${DATA_PATH}?t=${Date.now()}`);
-    this.data = await res.json();
-    this.mode = 'static';
+    return {
+      data: { trips: j.trips.map((t) => t.data) },
+      versions: Object.fromEntries(j.trips.map((t) => [t.id, t.version])),
+      access: { admin: !!j.admin, keys: j.keys || [], empty: !!j.empty },
+    };
   }
 
-  hasLocalChanges() { return !!readJSON(LS_LOCAL, null); }
+  async load() {
+    this.loadError = '';
+    if (isConnected()) {
+      try {
+        const r = await this.fetchShared();
+        Object.assign(this, r);
+        this.mode = 'shared';
+        return;
+      } catch (e) {
+        this.loadError = e.message;
+        this.mode = 'shared';
+        this.data = { trips: [] };
+        throw e;
+      }
+    }
+    this.mode = 'local';
+    const local = readJSON(LS_LOCAL, null);
+    if (local) { this.data = local; return; }
+    try {
+      const res = await fetch(`data/trips.json?t=${Date.now()}`);
+      this.data = res.ok ? await res.json() : { trips: [] };
+    } catch { this.data = { trips: [] }; }
+  }
+
+  canCreate() { return this.mode === 'local' || this.access.keys.length > 0; }
 
   /**
-   * Apply a change. `mutate(data)` runs against the freshest copy, so when
-   * syncing it is re-applied on top of anything saved from another device in
-   * the meantime. `change` (optional) is recorded in the change log.
+   * Apply a change. `mutate(data)` runs against the freshest copy, so with the
+   * sync server it is re-applied on top of anything saved from another device.
+   * `change` (optional) is added to that trip's change log.
    */
-  update(mutate, message, change) {
-    const who = getName() || 'Someone';
+  update(mutate, message, change, opts = {}) {
     const entry = change ? {
       id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
       at: new Date().toISOString(),
-      by: who,
+      by: getName() || 'Someone',
       ...change,
     } : null;
     const apply = (d) => {
       mutate(d);
-      if (entry) d.changes = [entry, ...(d.changes || []).filter((c) => c.id !== entry.id)].slice(0, MAX_CHANGES);
+      const t = entry && entry.tripId && d.trips.find((x) => x.id === entry.tripId);
+      if (t) t.changes = [entry, ...(t.changes || []).filter((c) => c.id !== entry.id)].slice(0, MAX_CHANGES);
     };
     apply(this.data);
     this.emit();
-    const msg = `${message || 'Update trips'}${getName() ? ` (by ${getName()})` : ''}`;
-    this.saving = this.saving.then(() => this.persist(apply, msg)).catch(async (e) => {
+    this.saving = this.saving.then(() => this.persist(apply, opts)).catch(async (e) => {
       console.warn(e);
       this.onError && this.onError(e);
-      // The change didn't save: show what is actually stored again.
-      if (backendKind()) { try { await this.load(); this.emit(); } catch { /* keep local view */ } }
+      if (this.mode === 'shared') { try { await this.load(); } catch { /* ignore */ } this.emit(); }
     });
     return this.saving;
   }
 
-  async persist(apply, message) {
-    const b = backend();
-    if (!b) {
+  async persist(apply, opts = {}) {
+    if (this.mode !== 'shared') {
       writeJSON(LS_LOCAL, this.data);
-      this.mode = 'local';
-      this.onSaved && this.onSaved('local');
+      this.onSaved && this.onSaved('local', opts);
       return;
     }
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const { data, sha } = await b.get();
-      apply(data);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const fresh = await this.fetchShared();
+      const before = new Map(fresh.data.trips.map((t) => [t.id, JSON.stringify(t)]));
+      const d = clone(fresh.data);
+      apply(d);
+      const versions = { ...fresh.versions };
       try {
-        this.sha = await b.put(data, sha, message);
-        this.data = data;
-        this.mode = backendKind();
-        writeJSON(LS_LOCAL, null);
-        this.emit();
-        this.onSaved && this.onSaved(this.mode);
-        return;
+        for (const t of d.trips) {
+          if (!before.has(t.id)) {
+            const r = await api('/trips', { method: 'POST', body: { data: t, by: getName() } });
+            if (r.invite) addKey(r.invite);
+            if (r.id !== t.id) { this.onRenamed && this.onRenamed(t.id, r.id); t.id = r.id; }
+            versions[t.id] = r.version;
+          } else if (before.get(t.id) !== JSON.stringify(t)) {
+            const r = await api(`/trips/${encodeURIComponent(t.id)}`, { method: 'PUT', body: { data: t, version: versions[t.id] } });
+            versions[t.id] = r.version;
+          }
+        }
+        for (const id of before.keys()) {
+          if (!d.trips.some((t) => t.id === id)) await api(`/trips/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        }
       } catch (e) {
-        if (e.status !== 409 && e.status !== 422) throw e;
+        if (e.status === 409) continue;
+        throw e;
       }
+      this.data = d; this.versions = versions;
+      const after = await this.fetchShared().catch(() => null); // pick up new access (e.g. creator invite)
+      if (after) Object.assign(this, after);
+      this.emit();
+      this.onSaved && this.onSaved('shared', opts);
+      return;
     }
-    throw new Error('Could not save: the trip kept changing. Reload and try again.');
+    throw new Error('Could not save: the trip kept changing. Try again.');
   }
 
-  /** Push this browser's local-only copy, replacing the shared file. */
-  async pushLocal() {
-    const b = backend();
-    const local = readJSON(LS_LOCAL, null) || this.data;
-    const { sha } = await b.get();
-    this.sha = await b.put(local, sha, `Upload trips saved in a browser${getName() ? ` (by ${getName()})` : ''}`);
-    this.data = local; this.mode = backendKind();
-    writeJSON(LS_LOCAL, null);
+  // ---- invites
+  async listInvites() { return (await api('/invites')).invites; }
+  async createInvite(tripIds, label) { return (await api('/invites', { method: 'POST', body: { tripIds, label, by: getName() } })).code; }
+  async revokeInvite(code) { await api(`/invites/${encodeURIComponent(code)}`, { method: 'DELETE' }); }
+
+  /** Owner only: copy trips (e.g. the old data/trips.json) onto the server. */
+  async importTrips(trips) {
+    await api('/import', { method: 'POST', body: { trips } });
+    await this.load();
     this.emit();
   }
 
-  replaceAll(data, message, change) {
-    const copy = JSON.parse(JSON.stringify(data));
-    return this.update((d) => {
-      const keepLog = d.changes || [];
-      Object.keys(d).forEach((k) => delete d[k]);
-      Object.assign(d, JSON.parse(JSON.stringify(copy)));
-      d.changes = [...(d.changes || []), ...keepLog.filter((c) => !(d.changes || []).some((x) => x.id === c.id))]
-        .sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, MAX_CHANGES);
-    }, message, change);
-  }
-
-  /** Upload an image into the repo's images/ folder; returns its path. */
-  async uploadImage(blob, name) {
-    const b64 = bytesToB64(new Uint8Array(await blob.arrayBuffer()));
-    return backend().image(name, b64);
+  /** Upload a photo; returns its URL (or a data: URL when not connected). */
+  async uploadImage(blob) {
+    if (this.mode !== 'shared') {
+      return new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(blob); });
+    }
+    const content = bytesToB64(new Uint8Array(await blob.arrayBuffer()));
+    return (await api('/images', { method: 'POST', body: { content, type: blob.type || 'image/jpeg' } })).url;
   }
 }
 
 export const store = new Store();
 
+/** Photos uploaded by earlier versions live in the repo's images/ folder. */
 export function rawUrl(path) {
-  const s = getSettings();
-  if (!s.owner || !s.repo) return '';
-  return `https://raw.githubusercontent.com/${s.owner}/${s.repo}/${s.branch}/${path}`;
+  const m = location.hostname.match(/^([^.]+)\.github\.io$/i);
+  if (!m) return '';
+  const repo = location.pathname.split('/').filter(Boolean)[0] || `${m[1]}.github.io`;
+  return `https://raw.githubusercontent.com/${m[1]}/${repo}/main/${path}`;
 }
 
 export function slugify(s) {

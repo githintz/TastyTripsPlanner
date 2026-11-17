@@ -3,7 +3,8 @@
 A small, static trip planner for GitHub Pages. Create trips, add locations (e.g. Tokyo, Kyoto) and
 collect the dishes you want to try: photo, one-line description, vegetarian friendliness,
 price range in local and home currency, and the top 3 spots per location. Plan together with
-friends: everyone can edit, and a change log shows who changed what and when.
+friends: everyone invited to a trip can edit it, heart the dishes they want to try, and see a change
+log of who changed what and when.
 
 No build step: plain HTML, CSS and JavaScript modules.
 
@@ -13,75 +14,70 @@ No build step: plain HTML, CSS and JavaScript modules.
 | --- | --- |
 | `index.html` | Page shell |
 | `css/styles.css` | All styling and animations |
-| `js/app.js` | Screens, forms, change log and routing |
-| `js/store.js` | Loading/saving data, sync backends |
+| `js/app.js` | Screens, forms, invites, hearts, change log and routing |
+| `js/store.js` | Loading/saving data through the sync server |
 | `js/images.js` | Dish photos (chosen photo, or Wikipedia as a fallback) |
-| `data/trips.json` | **All trip data**, including the change log |
-| `config.json` | Address of the shared sync server |
-| `worker/worker.js` | The sync server (a Cloudflare Worker) |
-| `images/` | Photos uploaded from the site (created on first upload) |
+| `config.json` | Address of the sync server |
+| `worker/worker.js` | The sync server (a Cloudflare Worker + D1 database) |
+| `data/trips.json` | The original trip data, used once to move trips to the server |
 
-## Hosting on GitHub Pages
+## How sharing works
 
-1. Settings → Pages → *Deploy from a branch* → pick the branch and `/ (root)`.
-2. Open `https://<user>.github.io/<repo>/`.
+Trips are stored privately in a Cloudflare D1 database behind the sync server, not in this public
+repo. Nobody can see a trip without a code that unlocks it:
 
-## Planning together (shared sync server)
+- **Owner code** (`ADMIN_CODE`, yours only): sees every trip, can delete trips and manage all invites.
+- **Invite links** (`…/#join=<code>`): each one unlocks only the trips picked when it was made.
+  Anyone with access to a trip can invite people to it; invites can be revoked at any time.
+- A friend who creates a new trip automatically gets a private code for it.
 
-Friends shouldn't need GitHub accounts or tokens. A tiny free Cloudflare Worker holds one GitHub
-token for the whole group and saves everyone's edits to `data/trips.json`. Friends only need the
-invite link. Set it up once (about 10 minutes):
+The first time someone opens the site, it asks for their name. Names are shown on hearts and in the
+change log. They're self-reported, not verified accounts.
 
-1. **GitHub token**: create a [fine-grained token](https://github.com/settings/personal-access-tokens/new)
-   → *Only select repositories* → this repo → Permissions → Repository → **Contents: Read and write**.
-2. **Worker**: sign in at [dash.cloudflare.com](https://dash.cloudflare.com) (free account) →
-   *Workers & Pages* → *Create* → *Create Worker* → name it `tasty-trips` → *Deploy* →
-   *Edit code* → replace everything with the contents of `worker/worker.js` → *Deploy*.
-3. **Settings** of the worker → *Variables and Secrets* → add:
-   - `GITHUB_TOKEN`: *Secret*, the token from step 1
-   - `TRIP_PASSCODE`: *Secret*, any code your friends will need to edit (e.g. `ramen2026`)
-   - `OWNER`: `githintz`, `REPO`: `TastyTripsPlanner`, `BRANCH`: the branch Pages deploys from
-   - optional `ALLOWED_ORIGIN`: `https://githintz.github.io`
-4. Put the worker's address (e.g. `https://tasty-trips.<you>.workers.dev`) into `config.json`:
-   `{ "syncUrl": "https://tasty-trips.<you>.workers.dev" }`.
-5. Open the site → cloud button → enter the trip code → **Share invite link**. The link looks like
-   `https://githintz.github.io/TastyTripsPlanner/#join=ramen2026`. Anyone who opens it can edit;
-   the site asks for their name once.
+## Setting up the sync server (Cloudflare)
 
-Every save becomes a commit in this repo, with the friend's name as the commit author.
+1. **Worker**: [dash.cloudflare.com](https://dash.cloudflare.com) → *Workers & Pages* → *Create* →
+   *Hello World* → name `tasty-trips` → *Deploy* → *Edit code* → paste `worker/worker.js` → *Deploy*.
+2. **Database**: *Storage & Databases* → *D1 SQL Database* → *Create* → name `tasty-trips`.
+   No tables needed; the worker creates them.
+3. **Bind it**: Worker → *Settings* → *Bindings* → *Add* → *D1 database* →
+   variable name `DB`, database `tasty-trips` → *Deploy*.
+4. **Owner code**: Worker → *Settings* → *Variables and Secrets* → *Add* → type *Secret*,
+   name `ADMIN_CODE`, value: a long code only you know → *Deploy*.
+   Optional: `ALLOWED_ORIGIN` (*Text*) = `https://githintz.github.io`.
+5. Put the worker address in `config.json`: `{ "syncUrl": "https://tasty-trips.<you>.workers.dev" }`.
+6. Open the site → cloud button → add your owner code → *Move trips from the old data file*
+   (once) → then use the person-plus button on a trip to create invite links.
 
-### Without the sync server
+Without a sync server (empty `syncUrl`), the site keeps everything in the browser.
 
-- **Owner only**: cloud button → *Trip owner: sync with a GitHub token* lets you save straight to
-  GitHub with your own token (stored only in that browser).
-- **Nothing set up**: edits are kept in that browser; use *Export / Import data* to move them.
+## Interest
+
+Tap the heart on a dish to show you want to try it. The number shows how many people are interested;
+the dish page lists who. *Sort → Interest* orders the list by hearts.
 
 ## Track changes
 
-Cloud button → **Track changes** lists every add, edit and delete, grouped by day, with the person's
-name, the time, and what changed (e.g. `Price: ¥1,000 – ¥1,800 → ¥1,200 – ¥1,800`). The log lives in
-`data/trips.json` (`changes`, newest 500 kept), so everyone sees the same history. Names are what each
-person typed in, not verified accounts.
+Cloud button → **Track changes** lists every add, edit and delete in the trips you can see, grouped by
+day, with the person's name, the time and what changed. Each trip keeps its newest 300 changes.
 
-## Data format
+## Data format (one trip)
 
 ```jsonc
 {
-  "version": 1,
-  "trips": [{
-    "id": "japan", "name": "Japan",
-    "currency": { "local": "¥", "home": "€", "rate": 0.005701 },   // 1 local = rate home
-    "locations": [{ "id": "tokyo", "name": "Tokyo" }],
-    "foods": [{
-      "id": "omurice", "name": "Omurice",
-      "category": "main",            // main | dessert | street | beverage
-      "description": "One sentence.",
-      "veg": "maybe",                // yes | maybe | no
-      "priceMin": 1000, "priceMax": 1800,
-      "image": "https://…",          // photo URL or images/… path; empty = Wikipedia photo
-      "wiki": ["Omurice"],           // Wikipedia article(s) used if the photo is missing or fails
-      "spots": { "tokyo": [{ "name": "Rengatei", "veg": false }] }  // ranked, up to 3; veg = offers a veg version
-    }]
+  "id": "japan", "name": "Japan",
+  "currency": { "local": "¥", "home": "€", "rate": 0.005701 },   // 1 local = rate home
+  "locations": [{ "id": "tokyo", "name": "Tokyo" }],
+  "foods": [{
+    "id": "omurice", "name": "Omurice",
+    "category": "main",            // main | dessert | street | beverage
+    "description": "One sentence.",
+    "veg": "maybe",                // yes | maybe | no
+    "priceMin": 1000, "priceMax": 1800,
+    "image": "https://…",          // photo URL; empty = Wikipedia photo
+    "wiki": ["Omurice"],           // Wikipedia article(s) used if the photo is missing or fails
+    "spots": { "tokyo": [{ "name": "Rengatei", "veg": false }] },  // ranked, up to 3
+    "likes": ["Alex", "Maya"]      // who is interested
   }],
   "changes": [{ "at": "2026-11-17T17:41:00Z", "by": "Alex", "kind": "dish", "action": "edited",
                 "target": "Omurice", "details": ["Price: ¥1,000 – ¥1,800 → ¥1,200 – ¥1,800"] }]
