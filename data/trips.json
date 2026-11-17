@@ -35,7 +35,7 @@
           "veg": "maybe",
           "priceMin": 1000,
           "priceMax": 1800,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Omurice_by_Taimeiken.jpg?width=1200",
           "wiki": [
             "Omurice"
           ],
@@ -78,7 +78,7 @@
           "veg": "no",
           "priceMin": 5000,
           "priceMax": 15000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Yonezawa_Beef_Steak.jpg?width=1200",
           "wiki": [
             "Wagyu"
           ],
@@ -121,7 +121,7 @@
           "veg": "no",
           "priceMin": 800,
           "priceMax": 1300,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Tonkotsu_ramen_in_Tokyo.jpg?width=1200",
           "wiki": [
             "Tonkotsu ramen",
             "Ramen"
@@ -165,7 +165,7 @@
           "veg": "yes",
           "priceMin": 1200,
           "priceMax": 2000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Souffe_pancakes_%2876651%29.jpg?width=1200",
           "wiki": [
             "Soufflé pancake",
             "Japanese soufflé pancake",
@@ -210,7 +210,7 @@
           "veg": "yes",
           "priceMin": 200,
           "priceMax": 400,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Taiyaki_005.jpg?width=1200",
           "wiki": [
             "Taiyaki"
           ],
@@ -253,7 +253,7 @@
           "veg": "maybe",
           "priceMin": 1500,
           "priceMax": 3500,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Shrimp_and_vegetables_tempura_-_Massachusetts.jpg?width=1200",
           "wiki": [
             "Tempura"
           ],
@@ -296,7 +296,7 @@
           "veg": "maybe",
           "priceMin": 500,
           "priceMax": 1000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Kake_udon_by_Joe_Jones_in_Tokyo.jpg?width=1200",
           "wiki": [
             "Udon"
           ],
@@ -339,7 +339,7 @@
           "veg": "maybe",
           "priceMin": 3000,
           "priceMax": 6000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Shabu-shabu_Sapporo.jpg?width=1200",
           "wiki": [
             "Shabu-shabu"
           ],
@@ -382,7 +382,7 @@
           "veg": "maybe",
           "priceMin": 600,
           "priceMax": 1200,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Zaru_soba_by_spinachdip.jpg?width=1200",
           "wiki": [
             "Soba"
           ],
@@ -425,7 +425,7 @@
           "veg": "maybe",
           "priceMin": 2000,
           "priceMax": 6000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Assorted_Nigiri_-1_%289865149266%29.jpg?width=1200",
           "wiki": [
             "Sushi"
           ],
@@ -468,7 +468,7 @@
           "veg": "no",
           "priceMin": 2500,
           "priceMax": 5000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Tokyo_Chikuyotei_Unadon01s2100.jpg?width=1200",
           "wiki": [
             "Unadon",
             "Unagi"
@@ -512,7 +512,7 @@
           "veg": "no",
           "priceMin": 1500,
           "priceMax": 3000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Yakitori_-_Tora.jpg?width=1200",
           "wiki": [
             "Yakitori"
           ],
@@ -555,7 +555,7 @@
           "veg": "maybe",
           "priceMin": 700,
           "priceMax": 1200,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Beef_curry_rice_003.jpg?width=1200",
           "wiki": [
             "Japanese curry"
           ],
@@ -598,7 +598,7 @@
           "veg": "no",
           "priceMin": 1000,
           "priceMax": 2000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Tonkatsu_Plate.jpg?width=1200",
           "wiki": [
             "Tonkatsu"
           ],
@@ -641,7 +641,7 @@
           "veg": "no",
           "priceMin": 8000,
           "priceMax": 20000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Kobe_beef_meal_served_in_a_steakhouse_in_Kobe.jpeg?width=1200",
           "wiki": [
             "Kobe beef"
           ],
@@ -684,7 +684,7 @@
           "veg": "maybe",
           "priceMin": 150,
           "priceMax": 300,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Onigiri_002.jpg?width=1200",
           "wiki": [
             "Onigiri"
           ],
@@ -727,7 +727,7 @@
           "veg": "maybe",
           "priceMin": 400,
           "priceMax": 700,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Gyoza_no_Antei_-_3.jpg?width=1200",
           "wiki": [
             "Gyoza",
             "Jiaozi"
@@ -771,7 +771,7 @@
           "veg": "maybe",
           "priceMin": 800,
           "priceMax": 1500,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Bacon_and_cheese_okonomiyaki.jpg?width=1200",
           "wiki": [
             "Okonomiyaki"
           ],
@@ -814,7 +814,7 @@
           "veg": "no",
           "priceMin": 500,
           "priceMax": 800,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Takoyaki_cooked_by_Wanaka_Sennichimae_Main_Shop.jpg?width=1200",
           "wiki": [
             "Takoyaki"
           ],
@@ -857,7 +857,7 @@
           "veg": "yes",
           "priceMin": 600,
           "priceMax": 1500,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Japanese_sake_glass_and_flask.jpg?width=1200",
           "wiki": [
             "Sake"
           ],
@@ -900,7 +900,7 @@
           "veg": "yes",
           "priceMin": 500,
           "priceMax": 1000,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Matcha_%285026245674%29.jpg?width=1200",
           "wiki": [
             "Matcha"
           ],
@@ -943,7 +943,7 @@
           "veg": "maybe",
           "priceMin": 700,
           "priceMax": 1500,
-          "image": "",
+          "image": "https://commons.wikimedia.org/wiki/Special:FilePath/Makunouchi_bento_of_Origin_Bento.jpg?width=1200",
           "wiki": [
             "Bento",
             "Ekiben"
@@ -982,5 +982,6 @@
       ],
       "destinations": []
     }
-  ]
+  ],
+  "changes": []
 }

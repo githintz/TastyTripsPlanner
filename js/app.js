@@ -1,5 +1,6 @@
 import {
   store, CATEGORIES, VEG, getSettings, saveSettings, isConnected, testConnection, uniqueId, slugify,
+  loadConfig, backendKind, getName, setName, getTripCode, setTripCode,
 } from './store.js';
 import { hydrateImage, resizeImage } from './images.js';
 
@@ -31,6 +32,8 @@ const I = {
   download: svg('<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>', 'xs'),
   upload: svg('<path d="M12 20V9M7 14l5-5 5 5M5 4h14"/>', 'xs'),
   x: svg('<path d="M6 6l12 12M18 6L6 18"/>', 'sm'),
+  share: svg('<circle cx="18" cy="5" r="2.5"/><circle cx="6" cy="12" r="2.5"/><circle cx="18" cy="19" r="2.5"/><path d="M8.2 10.8l7.6-4.4M8.2 13.2l7.6 4.4"/>', 'xs'),
+  history: svg('<path d="M3 12a9 9 0 103-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/>', 'sm'),
 };
 const PH = {
   main: '<path d="M3 12h18a9 9 0 01-18 0z"/><path d="M8 8c0-2 1.5-3 4-3s4 1 4 3"/>',
@@ -171,8 +174,8 @@ function refresh() {
 }
 
 function syncButton() {
-  const s = isConnected();
-  const cls = s ? (store.mode === 'github' ? 'on' : 'warn') : (store.hasLocalChanges() ? 'warn' : '');
+  const kind = backendKind();
+  const cls = kind ? (store.mode === kind ? 'on' : 'warn') : (store.hasLocalChanges() ? 'warn' : '');
   return `<button class="icon-btn sync-dot ${cls}" data-action="settings" aria-label="Sync and settings">${I.cloud}</button>`;
 }
 
@@ -382,7 +385,7 @@ function leaveDetail() {
 
 // ---------------------------------------------------------------- sheets
 
-function openSheet({ title, body, saveLabel = 'Save', onSave, onMount }) {
+function openSheet({ title, body, saveLabel = 'Save', onSave, onMount, onClose }) {
   const root = $('#sheet-root');
   const scrim = document.createElement('div');
   scrim.className = 'scrim';
@@ -406,6 +409,8 @@ function openSheet({ title, body, saveLabel = 'Save', onSave, onMount }) {
   const api = {
     el,
     close() {
+      if (el.classList.contains('out')) return;
+      onClose && onClose();
       el.classList.add('out'); scrim.classList.add('out');
       setTimeout(() => { el.remove(); scrim.remove(); }, 320);
       if (!detail && $$('.sheet:not(.out)').length === 0) document.body.classList.remove('no-scroll');
@@ -413,6 +418,10 @@ function openSheet({ title, body, saveLabel = 'Save', onSave, onMount }) {
   };
   scrim.addEventListener('click', api.close);
   $('[data-sheet="cancel"]', el).addEventListener('click', api.close);
+  el.addEventListener('click', (e) => {
+    // Following an in-app link (e.g. from the change log) closes every open sheet.
+    if (e.target.closest('a[href^="#/"]')) $$('.sheet:not(.out) [data-sheet="cancel"]').forEach((b) => b.click());
+  });
   if (onSave) {
     $('[data-sheet="save"]', el).addEventListener('click', async () => {
       const ok = await onSave(api);
@@ -600,11 +609,14 @@ function foodForm(trip, food) {
       checkRule();
 
       const del = $('#ff-delete', el);
-      del && twoStepDelete(del, 'Delete dish', () => {
+      del && twoStepDelete(del, 'Delete dish', async () => {
+        if (!(await ensureName())) return;
         const id = food.id; const tid = trip.id;
         close();
         if (detail) leaveDetail();
-        store.update((d) => { const t = d.trips.find((x) => x.id === tid); if (t) t.foods = t.foods.filter((x) => x.id !== id); }, `Delete dish: ${food.name}`);
+        store.update((d) => { const t = d.trips.find((x) => x.id === tid); if (t) t.foods = t.foods.filter((x) => x.id !== id); },
+          `Delete dish: ${food.name}`,
+          { kind: 'dish', action: 'deleted', tripId: tid, tripName: trip.name, foodId: id, target: food.name, details: [] });
       });
     },
     async onSave({ el }) {
@@ -615,6 +627,7 @@ function foodForm(trip, food) {
       const fail = (m) => { err.textContent = m; err.hidden = false; err.scrollIntoView({ behavior: 'smooth', block: 'center' }); return false; };
       if (!name) return fail('Give the dish a name.');
       if (a != null && b < a) return fail('The "to" price should be higher than the "from" price.');
+      if (!(await ensureName())) return false;
       const spots = {};
       trip.locations.forEach((l) => {
         const box = $(`.loc-spots[data-loc="${CSS.escape(l.id)}"]`, el);
@@ -643,12 +656,16 @@ function foodForm(trip, food) {
         }
       }
       const tid = trip.id;
+      const details = food ? foodDiff(food, out, trip)
+        : [[catLabel(out.category), `Vegetarian: ${VEG[out.veg].label}`, priceRange(out, trip.currency)].filter(Boolean).join(' · ')];
+      if (food && !details.length) return true; // nothing changed
       store.update((d) => {
         const t = d.trips.find((x) => x.id === tid);
         if (!t) return;
         const idx = t.foods.findIndex((x) => x.id === out.id);
         if (idx >= 0) t.foods[idx] = JSON.parse(JSON.stringify(out)); else t.foods.push(JSON.parse(JSON.stringify(out)));
-      }, `${food ? 'Update' : 'Add'} dish: ${name}`);
+      }, `${food ? 'Update' : 'Add'} dish: ${name}`,
+      { kind: 'dish', action: food ? 'edited' : 'added', tripId: tid, tripName: trip.name, foodId: out.id, target: name, details });
       return true;
     },
   });
@@ -706,13 +723,15 @@ function tripForm(trip, { addLocation = false } = {}) {
       if (isNew) add(false);
       else if (addLocation) setTimeout(() => add(), 350);
       const del = $('#tf-delete', el);
-      del && twoStepDelete(del, 'Delete trip', () => {
+      del && twoStepDelete(del, 'Delete trip', async () => {
+        if (!(await ensureName())) return;
         const id = trip.id; close();
         location.hash = '#/';
-        store.update((d) => { d.trips = d.trips.filter((x) => x.id !== id); }, `Delete trip: ${trip.name}`);
+        store.update((d) => { d.trips = d.trips.filter((x) => x.id !== id); }, `Delete trip: ${trip.name}`,
+          { kind: 'trip', action: 'deleted', tripId: id, tripName: trip.name, target: trip.name, details: [`${trip.foods.length} dishes removed`] });
       });
     },
-    onSave({ el }) {
+    async onSave({ el }) {
       const err = $('#tf-err', el);
       const name = $('#tf-name', el).value.trim();
       if (!name) { err.textContent = 'Give the trip a name.'; err.hidden = false; return false; }
@@ -723,70 +742,223 @@ function tripForm(trip, { addLocation = false } = {}) {
         .map((l) => { const id = l.id || uniqueId(l.name, taken.concat(t.locations.map((x) => x.id))); taken.push(id); return { id, name: l.name }; });
       const currency = { ...t.currency, local: $('#tf-local', el).value.trim() || t.currency.local, home: $('#tf-home', el).value.trim() || t.currency.home, rate };
       const cover = $('#tf-cover', el).value.trim();
+      if (!(await ensureName())) return false;
       if (isNew) {
         const id = uniqueId(name, store.data.trips.map((x) => x.id));
         const nt = { ...t, id, name, cover, coverWiki: [name], currency, locations };
-        store.update((d) => { d.trips.push(JSON.parse(JSON.stringify(nt))); }, `Add trip: ${name}`);
+        store.update((d) => { d.trips.push(JSON.parse(JSON.stringify(nt))); }, `Add trip: ${name}`,
+          { kind: 'trip', action: 'added', tripId: id, tripName: name, target: name, details: locations.length ? [`Locations: ${locations.map((l) => l.name).join(', ')}`] : [] });
         location.hash = `#/trip/${encodeURIComponent(id)}`;
       } else {
         const id = trip.id;
         const keep = new Set(locations.map((l) => l.id));
+        const details = tripDiff(trip, { name, cover, currency, locations });
+        if (!details.length) return true;
         store.update((d) => {
           const x = d.trips.find((y) => y.id === id); if (!x) return;
           x.name = name; x.cover = cover; x.currency = currency; x.locations = locations;
           if (!x.coverWiki || !x.coverWiki.length) x.coverWiki = [name];
           x.foods.forEach((f) => { Object.keys(f.spots || {}).forEach((k) => { if (!keep.has(k)) delete f.spots[k]; }); });
-        }, `Update trip: ${name}`);
+        }, `Update trip: ${name}`, { kind: 'trip', action: 'edited', tripId: id, tripName: name, target: name, details });
       }
       return true;
     },
   });
 }
 
+// ---------------------------------------------------------------- change log helpers
+
+function foodDiff(a, b, trip) {
+  const out = [];
+  const cur = trip.currency;
+  if (a.name !== b.name) out.push(`Name: ${a.name} → ${b.name}`);
+  if (a.category !== b.category) out.push(`Category: ${catLabel(a.category)} → ${catLabel(b.category)}`);
+  if ((a.description || '') !== (b.description || '')) out.push(a.description ? 'Description updated' : 'Description added');
+  if (a.veg !== b.veg) out.push(`Vegetarian: ${VEG[a.veg].label} → ${VEG[b.veg].label}`);
+  const pa = priceRange(a, cur); const pb = priceRange(b, cur);
+  if (pa !== pb) out.push(`Price: ${pa || '–'} → ${pb || '–'}`);
+  if ((a.image || '') !== (b.image || '')) out.push('Photo changed');
+  trip.locations.forEach((l) => {
+    const fmt = (f) => ((f.spots || {})[l.id] || []).filter((s) => s.name).map((s) => s.name + (s.veg ? ' (veg)' : '')).join(', ') || '–';
+    const sa = fmt(a); const sb = fmt(b);
+    if (sa !== sb) out.push(`${l.name} spots: ${sa} → ${sb}`);
+  });
+  return out;
+}
+
+function tripDiff(a, b) {
+  const out = [];
+  if (a.name !== b.name) out.push(`Name: ${a.name} → ${b.name}`);
+  const la = a.locations.map((l) => l.name).join(', ') || '–';
+  const lb = b.locations.map((l) => l.name).join(', ') || '–';
+  if (la !== lb) out.push(`Locations: ${la} → ${lb}`);
+  if (a.currency.rate !== b.currency.rate || a.currency.local !== b.currency.local || a.currency.home !== b.currency.home) {
+    out.push(`Exchange rate: ${a.currency.local}1 = ${a.currency.home}${a.currency.rate} → ${b.currency.local}1 = ${b.currency.home}${b.currency.rate}`);
+  }
+  if ((a.cover || '') !== (b.cover || '')) out.push('Cover photo changed');
+  return out;
+}
+
+const AVATARS = [['#F3E3C6', '#6E4A14'], ['#E4E6DA', '#4A5233'], ['#F2DFDA', '#84402F'], ['#DDE6EE', '#33506A'], ['#E9E0EE', '#58406A'], ['#E1ECE4', '#2B5A3E']];
+function avatar(name) {
+  let h = 0; for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  const [bg, fg] = AVATARS[h % AVATARS.length];
+  return `<span class="avatar" style="background:${bg};color:${fg}" aria-hidden="true">${esc(name.trim().charAt(0).toUpperCase() || '?')}</span>`;
+}
+
+function dayLabel(d) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const day = new Date(d); day.setHours(0, 0, 0, 0);
+  const diff = Math.round((today - day) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  return d.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: day.getFullYear() === today.getFullYear() ? undefined : 'numeric' });
+}
+
+function changeItem(c) {
+  const at = new Date(c.at);
+  const trip = store.data.trips.find((t) => t.id === c.tripId);
+  const food = trip && c.foodId && trip.foods.find((f) => f.id === c.foodId);
+  let target = `<b>${esc(c.target || '')}</b>`;
+  if (food) target = `<a href="#/trip/${encodeURIComponent(trip.id)}/food/${encodeURIComponent(food.id)}">${esc(c.target)}</a>`;
+  else if (c.kind === 'trip' && trip) target = `<a href="#/trip/${encodeURIComponent(trip.id)}">${esc(c.target)}</a>`;
+  const what = c.kind === 'data' ? 'imported a data file' : `${esc(c.action)} ${c.kind === 'trip' ? 'trip ' : ''}${target}`;
+  const where = c.kind === 'dish' && c.tripName ? `${esc(c.tripName)} · ` : '';
+  const details = (c.details || []).filter(Boolean);
+  return `<li class="change">
+    ${avatar(c.by || '?')}
+    <div class="c-body">
+      <div class="c-title"><b>${esc(c.by || 'Someone')}</b> ${what}</div>
+      <div class="c-meta"><time datetime="${esc(c.at)}" title="${esc(at.toLocaleString())}">${where}${at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>
+      ${details.length ? `<ul class="c-details">${details.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : ''}
+    </div>
+  </li>`;
+}
+
+function changesSheet() {
+  const list = (store.data.changes || []).slice().sort((a, b) => (a.at < b.at ? 1 : -1));
+  let body;
+  if (!list.length) {
+    body = '<div class="empty" style="margin:0"><h2>No changes yet</h2><p>Every add, edit and delete from now on shows up here with who made it and when.</p></div>';
+  } else {
+    const groups = [];
+    list.forEach((c) => {
+      const label = dayLabel(new Date(c.at));
+      const g = groups[groups.length - 1];
+      if (g && g.label === label) g.items.push(c); else groups.push({ label, items: [c] });
+    });
+    body = groups.map((g) => `<section class="change-day"><h3>${esc(g.label)}</h3><ul class="changes">${g.items.map(changeItem).join('')}</ul></section>`).join('');
+  }
+  openSheet({ title: 'Changes', body });
+}
+
+// ---------------------------------------------------------------- your name
+
+function askName({ welcome = false } = {}) {
+  return new Promise((resolve) => {
+    let done = false;
+    const tripNames = store.data.trips.map((t) => t.name).join(', ');
+    openSheet({
+      title: welcome ? 'Welcome' : 'Your name',
+      saveLabel: 'Continue',
+      body: `
+        <p style="margin:0;color:var(--ink-2)">${welcome
+    ? `You're planning ${tripNames ? `<b>${esc(tripNames)}</b>` : 'a trip'} together. What name should your friends see next to your changes?`
+    : 'Your name is shown next to your changes in the change log.'}</p>
+        <div class="field"><label for="nm-name">Your name</label>
+          <input class="input" id="nm-name" value="${esc(getName())}" placeholder="e.g. Alex" maxlength="40" autocomplete="given-name"></div>
+        <span class="hint err" id="nm-err" hidden></span>`,
+      onMount({ el }) {
+        const inp = $('#nm-name', el);
+        setTimeout(() => inp.focus(), 350);
+        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') $('[data-sheet="save"]', el).click(); });
+      },
+      onSave({ el }) {
+        const v = $('#nm-name', el).value.trim();
+        if (!v) { const e = $('#nm-err', el); e.textContent = 'Please enter a name.'; e.hidden = false; return false; }
+        setName(v); done = true; resolve(v);
+        return true;
+      },
+      onClose() { if (!done) resolve(getName() || null); },
+    });
+  });
+}
+const ensureName = async () => getName() || askName();
+
+function inviteLink() {
+  const code = getTripCode();
+  return `${location.origin}${location.pathname}${code ? `#join=${encodeURIComponent(code)}` : ''}`;
+}
+
+async function shareInvite() {
+  const url = inviteLink();
+  try {
+    if (navigator.share) { await navigator.share({ title: 'Tasty Trips', text: 'Plan the food for our trip with me', url }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  try { await navigator.clipboard.writeText(url); toast('Invite link copied'); } catch { prompt('Copy this invite link', url); }
+}
+
 // ---------------------------------------------------------------- settings / sync
 
 function settingsSheet() {
+  const kind = backendKind();
   const s = getSettings();
-  const connected = isConnected();
   const local = store.hasLocalChanges();
-  const status = connected
-    ? (store.mode === 'github'
-      ? `<span class="dot on"></span><div><b>Synced with GitHub</b><br><span class="hint">Edits are committed to ${esc(s.owner)}/${esc(s.repo)} (${esc(s.branch)}).</span></div>`
-      : `<span class="dot warn"></span><div><b>Can't reach GitHub</b><br><span class="hint">${esc(store.loadError || 'Check your token.')}</span></div>`)
-    : `<span class="dot${local ? ' warn' : ''}"></span><div><b>Not connected</b><br><span class="hint">${local ? 'You have edits saved in this browser only.' : 'Edits are saved in this browser only.'}</span></div>`;
+  const card = (dot, title, sub) => `<span class="dot ${dot}"></span><div><b>${esc(title)}</b><br><span class="hint">${esc(sub)}</span></div>`;
+  let status;
+  if (kind === 'shared') {
+    status = store.mode === 'shared'
+      ? card('on', 'Shared with your group', 'Everyone with the invite link can add and edit. Changes save for everyone.')
+      : card('warn', "Can't reach the sync server", store.loadError || 'Check your connection and reload.');
+  } else if (kind === 'github') {
+    status = store.mode === 'github'
+      ? card('on', 'Synced with GitHub', `Edits are committed to ${s.owner}/${s.repo} (${s.branch}).`)
+      : card('warn', "Can't reach GitHub", store.loadError || 'Check your token.');
+  } else {
+    status = card(local ? 'warn' : '', 'Saved on this device only', 'Turn on the shared sync server so friends can edit together (see README).');
+  }
+  const nChanges = (store.data.changes || []).length;
   const body = `
     <div class="status-card">${status}</div>
-    ${connected && local ? `<button class="secondary-btn" id="st-push">${I.upload}Upload this browser's edits to GitHub</button>` : ''}
-    <div class="field"><span class="label">GitHub repository</span>
-      <div class="price-row">
-        <input class="input" id="st-owner" value="${esc(s.owner)}" placeholder="owner" aria-label="Owner" autocomplete="off" autocapitalize="off">
-        <span style="color:var(--muted)">/</span>
-        <input class="input" id="st-repo" value="${esc(s.repo)}" placeholder="repository" aria-label="Repository" autocomplete="off" autocapitalize="off">
-      </div></div>
-    <div class="field"><label for="st-branch">Branch</label>
-      <input class="input" id="st-branch" value="${esc(s.branch)}" autocomplete="off" autocapitalize="off"></div>
-    <div class="field"><label for="st-token">Access token</label>
-      <input class="input" id="st-token" type="password" value="${esc(s.token)}" placeholder="github_pat_…" autocomplete="off">
-      <ol class="steps">
-        <li>Open <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub → New fine-grained token</a>.</li>
-        <li>Repository access: <b>Only select repositories</b> → this repo.</li>
-        <li>Permissions → Repository → <b>Contents: Read and write</b>.</li>
-        <li>Paste the token here. It's stored only in this browser.</li>
-      </ol></div>
+    ${kind && local ? `<button class="secondary-btn" id="st-push">${I.upload}Upload this browser's edits</button>` : ''}
+    <button class="row-btn" id="st-changes">${I.history}<span class="grow">Track changes</span><span class="count">${nChanges}</span>${I.next}</button>
+    <div class="field"><label for="st-name">Your name</label>
+      <input class="input" id="st-name" value="${esc(getName())}" placeholder="Shown next to your changes" maxlength="40" autocomplete="given-name"></div>
+    ${kind === 'shared' ? `
+      <div class="field"><label for="st-code">Trip code</label>
+        <input class="input" id="st-code" type="password" value="${esc(getTripCode())}" placeholder="From the invite link" autocomplete="off" autocapitalize="off">
+        <span class="hint">Needed to make changes. Opening the invite link fills it in.</span></div>
+      <button class="secondary-btn" id="st-invite" style="align-self:flex-start">${I.share}Share invite link</button>` : `
+      <details class="adv"${kind === 'github' ? ' open' : ''}>
+        <summary>Trip owner: sync with a GitHub token</summary>
+        <div class="field"><span class="label">GitHub repository</span>
+          <div class="price-row">
+            <input class="input" id="st-owner" value="${esc(s.owner)}" placeholder="owner" aria-label="Owner" autocomplete="off" autocapitalize="off">
+            <span style="color:var(--muted)">/</span>
+            <input class="input" id="st-repo" value="${esc(s.repo)}" placeholder="repository" aria-label="Repository" autocomplete="off" autocapitalize="off">
+          </div></div>
+        <div class="field"><label for="st-branch">Branch</label>
+          <input class="input" id="st-branch" value="${esc(s.branch)}" autocomplete="off" autocapitalize="off"></div>
+        <div class="field"><label for="st-token">Access token</label>
+          <input class="input" id="st-token" type="password" value="${esc(s.token)}" placeholder="github_pat_…" autocomplete="off">
+          <span class="hint">Only for you. Friends don't need this once the shared sync server is set up.</span></div>
+        ${kind === 'github' ? '<button class="secondary-btn" id="st-disconnect" type="button">Disconnect</button>' : ''}
+      </details>`}
     <span class="hint err" id="st-err" hidden></span>
     <div class="btn-row">
-      ${connected ? `<button class="secondary-btn" id="st-disconnect">Disconnect</button>` : ''}
       <button class="secondary-btn" id="st-export">${I.download}Export data</button>
       <label class="secondary-btn" style="cursor:pointer">${I.upload}Import data<input type="file" accept="application/json,.json" id="st-import" class="sr-only"></label>
     </div>`;
   openSheet({
-    title: 'Sync & data',
+    title: 'Sync & settings',
     body,
-    saveLabel: 'Connect',
     onMount({ el, close }) {
+      $('#st-changes', el).addEventListener('click', changesSheet);
+      const inv = $('#st-invite', el);
+      inv && inv.addEventListener('click', () => { const c = $('#st-code', el).value.trim(); if (c) setTripCode(c); shareInvite(); });
       const push = $('#st-push', el);
       push && push.addEventListener('click', async () => {
-        try { await store.pushLocal(); toast('Uploaded to GitHub'); close(); refresh(); } catch (e) { toast(e.message, true); }
+        try { await store.pushLocal(); toast('Uploaded'); close(); refresh(); } catch (e) { toast(e.message, true); }
       });
       const dis = $('#st-disconnect', el);
       dis && dis.addEventListener('click', async () => {
@@ -804,33 +976,56 @@ function settingsSheet() {
         try {
           const data = JSON.parse(await file.text());
           if (!data || !Array.isArray(data.trips)) throw new Error('Not a Tasty Trips file');
-          close(); store.replaceAll(data, 'Import trips'); toast('Imported');
+          if (!(await ensureName())) return;
+          close();
+          store.replaceAll(data, 'Import trips', { kind: 'data', action: 'imported', target: file.name, details: [`${data.trips.length} trip(s)`] });
+          toast('Imported');
         } catch (er) { toast(`Import failed: ${er.message}`, true); }
       });
     },
     async onSave({ el }) {
       const err = $('#st-err', el);
+      const showErr = (m) => { err.textContent = m; err.hidden = false; return false; };
+      const name = $('#st-name', el).value.trim();
+      if (name) setName(name);
+      const btn = $('[data-sheet="save"]', el);
+      if (kind === 'shared') {
+        const code = $('#st-code', el).value.trim();
+        const prev = getTripCode();
+        setTripCode(code);
+        btn.disabled = true; btn.textContent = 'Checking…';
+        try {
+          await testConnection();
+          if (store.mode !== 'shared') await store.load();
+          refresh(); toast('Saved');
+          return true;
+        } catch (e) {
+          setTripCode(prev); btn.disabled = false; btn.textContent = 'Save';
+          return showErr(e.status === 401 ? 'That trip code is not right.' : e.message);
+        }
+      }
       const next = {
         owner: $('#st-owner', el).value.trim(), repo: $('#st-repo', el).value.trim(),
         branch: $('#st-branch', el).value.trim() || 'main', token: $('#st-token', el).value.trim(),
       };
-      if (!next.owner || !next.repo || !next.token) { err.textContent = 'Fill in the repository and token.'; err.hidden = false; return false; }
       const prev = getSettings();
+      if (!next.token || (next.token === prev.token && next.owner === prev.owner && next.repo === prev.repo && next.branch === prev.branch)) {
+        refresh(); return true;
+      }
+      if (!next.owner || !next.repo) return showErr('Fill in the repository.');
       const hadLocal = store.hasLocalChanges();
       saveSettings(next);
-      const btn = $('[data-sheet="save"]', el); btn.disabled = true; btn.textContent = 'Checking…';
+      btn.disabled = true; btn.textContent = 'Checking…';
       try {
-        const full = await testConnection();
+        const info = await testConnection();
         await store.load();
         refresh();
-        toast(`Connected to ${full}${hadLocal ? '. Open this panel to upload your browser edits.' : ''}`);
+        toast(`Connected to ${info.repo}${hadLocal ? '. Open this panel to upload your browser edits.' : ''}`);
         return true;
       } catch (e) {
         saveSettings(prev);
-        btn.disabled = false; btn.textContent = 'Connect';
-        err.textContent = e.status === 401 ? 'That token was rejected by GitHub.' : e.status === 404 ? 'Repository or branch not found for this token.' : e.message;
-        err.hidden = false;
-        return false;
+        btn.disabled = false; btn.textContent = 'Save';
+        return showErr(e.status === 401 ? 'That token was rejected by GitHub.' : e.status === 404 ? 'Repository or branch not found for this token.' : e.message);
       }
     },
   });
@@ -921,13 +1116,24 @@ document.addEventListener('keydown', (e) => {
 
 // ---------------------------------------------------------------- boot
 
-store.onSaved = (where) => toast(where === 'github' ? 'Saved to GitHub' : 'Saved on this device');
+store.onSaved = (where) => toast(where === 'shared' ? 'Saved for everyone' : where === 'github' ? 'Saved to GitHub' : 'Saved on this device');
 store.onError = (e) => { toast(`Not saved: ${e.message}`, true); };
 store.on(refresh);
 
+/** An invite link looks like …/#join=CODE. Remember the code and tidy the URL. */
+function readJoinLink() {
+  const m = location.hash.match(/[#&?/]join=([^&]+)/);
+  if (!m) return false;
+  setTripCode(decodeURIComponent(m[1]));
+  history.replaceState(null, '', `${location.pathname}${location.search}#/`);
+  return true;
+}
+
 (async function boot() {
   $('#app').innerHTML = '<div class="loading"><div class="spinner" aria-label="Loading"></div></div>';
+  const joined = readJoinLink();
   try {
+    await loadConfig();
     await store.load();
   } catch (e) {
     $('#app').innerHTML = `<main class="page"><div class="empty"><h2>Couldn't load trips</h2><p>${esc(e.message)}</p></div></main>`;
@@ -935,4 +1141,6 @@ store.on(refresh);
   }
   route();
   if (document.fonts) document.fonts.ready.then(() => syncSegmented(document, false));
+  if (!getName() && (joined || backendKind() === 'shared')) setTimeout(() => askName({ welcome: true }), 500);
+  else if (joined) toast('You joined the trip');
 }());

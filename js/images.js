@@ -59,12 +59,20 @@ export function hydrateImage(img, item) {
     img.src = src;
   };
   const explicit = item.image || item.cover;
+  const viaWiki = () => wikiImage(item.wiki || item.coverWiki).then((src) => show(src));
   if (explicit) {
     const isRelative = !/^(https?:|data:|blob:)/.test(explicit);
-    show(explicit, isRelative ? rawUrl(explicit) : null);
+    const prevError = () => {
+      // Explicit photo failed (and its raw fallback, if any): try Wikipedia.
+      if (isRelative && img.dataset.triedRaw !== '1') { img.dataset.triedRaw = '1'; img.src = rawUrl(explicit); return; }
+      img.onerror = null; viaWiki();
+    };
+    img.onload = () => fallbackWrap && fallbackWrap.classList.add('is-loaded');
+    img.onerror = prevError;
+    img.src = explicit;
     return;
   }
-  wikiImage(item.wiki || item.coverWiki).then((src) => show(src));
+  viaWiki();
 }
 
 /** Downscale a picked photo to a JPEG blob (max 1600px). */
