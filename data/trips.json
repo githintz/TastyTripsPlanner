@@ -24,10 +24,6 @@
         {
           "id": "kyoto",
           "name": "Kyoto"
-        },
-        {
-          "id": "osaka",
-          "name": "Osaka"
         }
       ],
       "foods": [
@@ -988,6 +984,19 @@
     }
   ],
   "changes": [
+    {
+      "id": "mwl011908itms",
+      "at": "2026-11-17T18:01:22.836Z",
+      "by": "githintz",
+      "kind": "trip",
+      "action": "edited",
+      "tripId": "japan",
+      "tripName": "Japan",
+      "target": "Japan",
+      "details": [
+        "Locations: Tokyo, Kyoto, Osaka → Tokyo, Kyoto"
+      ]
+    },
     {
       "id": "mwl00vuuc2ihq",
       "at": "2026-11-17T18:01:15.846Z",
