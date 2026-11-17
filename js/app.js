@@ -211,8 +211,8 @@ function joinBox() {
   const admin = store.access.admin;
   return `<div class="empty join">
     <h2>${admin ? 'No trips here yet' : 'Join a trip'}</h2>
-    <p>${admin ? 'Create a trip, or move the trips from the old data file.' : 'Open the invite link a friend sent you, or paste the invite code here.'}</p>
-    ${admin ? `<button class="secondary-btn" data-action="migrate" style="margin-top:16px">${I.upload}Move trips from the old data file</button>` : `
+    <p>${admin ? 'Create your first trip with the button above.' : 'Open the invite link a friend sent you, or paste the invite code here.'}</p>
+    ${admin ? '' : `
     <form class="join-row" id="join-form">
       <label class="sr-only" for="join-code">Invite code</label>
       <input class="input" id="join-code" placeholder="Invite code" autocomplete="off" autocapitalize="off">
@@ -1112,7 +1112,7 @@ function settingsSheet() {
           <input class="input" id="st-code" placeholder="Invite or owner code" autocomplete="off" autocapitalize="off" aria-label="Add a code">
           <button class="secondary-btn" id="st-add-code" type="button">Add</button>
         </div></div>
-      ${store.access.admin ? `<button class="secondary-btn" id="st-migrate" style="align-self:flex-start">${I.upload}Move trips from the old data file</button>` : ''}` : ''}
+` : ''}
     <div class="btn-row">
       <button class="secondary-btn" id="st-export">${I.download}Export data</button>
       ${!shared || store.access.admin ? `<label class="secondary-btn" style="cursor:pointer">${I.upload}Import data<input type="file" accept="application/json,.json" id="st-import" class="sr-only"></label>` : ''}

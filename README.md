@@ -19,7 +19,6 @@ No build step: plain HTML, CSS and JavaScript modules.
 | `js/images.js` | Dish photos (chosen photo, or Wikipedia as a fallback) |
 | `config.json` | Address of the sync server |
 | `worker/worker.js` | The sync server (a Cloudflare Worker + D1 database) |
-| `data/trips.json` | The original trip data, used once to move trips to the server |
 
 ## How sharing works
 
@@ -46,8 +45,8 @@ change log. They're self-reported, not verified accounts.
    name `ADMIN_CODE`, value: a long code only you know → *Deploy*.
    Optional: `ALLOWED_ORIGIN` (*Text*) = `https://githintz.github.io`.
 5. Put the worker address in `config.json`: `{ "syncUrl": "https://tasty-trips.<you>.workers.dev" }`.
-6. Open the site → cloud button → add your owner code → *Move trips from the old data file*
-   (once) → then use the person-plus button on a trip to create invite links.
+6. Open the site → cloud button → add your owner code → then use the person-plus button on a trip
+   to create invite links. Back up all trips any time with *Export data*.
 
 Without a sync server (empty `syncUrl`), the site keeps everything in the browser.
 
