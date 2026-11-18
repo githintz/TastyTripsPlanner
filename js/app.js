@@ -3,6 +3,7 @@ import {
   loadConfig, getName, setName, getKeys, addKey, removeKey,
 } from './store.js';
 import { hydrateImage, resizeImage } from './images.js';
+import * as D from './destinations.js';
 
 // ---------------------------------------------------------------- helpers
 
@@ -118,7 +119,14 @@ let detailOpenedInApp = false;
 
 function parseHash() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
-  if (parts[0] === 'trip' && parts[1]) return { page: 'trip', tripId: parts[1], foodId: parts[2] === 'food' ? parts[3] : null };
+  if (parts[0] === 'trip' && parts[1]) {
+    return {
+      page: 'trip', tripId: parts[1],
+      foodId: parts[2] === 'food' ? parts[3] : null,
+      placeId: parts[2] === 'place' ? parts[3] : null,
+      dayId: parts[2] === 'day' ? parts[3] : null,
+    };
+  }
   return { page: 'trips' };
 }
 
@@ -128,8 +136,9 @@ function route() {
   const samePage = current.page === r.page && current.tripId === r.tripId;
   if (!samePage) {
     closeDetail(true);
+    D.closeOverlay(true);
     current = { page: r.page, tripId: r.tripId };
-    if (r.page === 'trip') { ui.cat = 'all'; ui.q = ''; ui.tab = 'food'; }
+    if (r.page === 'trip') { ui.cat = 'all'; ui.q = ''; ui.tab = r.placeId || r.dayId ? 'destinations' : 'food'; }
     renderPage();
     window.scrollTo(0, 0);
   }
@@ -137,7 +146,8 @@ function route() {
     const trip = getTrip(r.tripId);
     const food = r.foodId && trip.foods.find((f) => f.id === r.foodId);
     if (food) openDetail(trip, food); else { detailOpenedInApp = false; closeDetail(); }
-  }
+    D.route(r, trip);
+  } else D.closeOverlay();
 }
 window.addEventListener('hashchange', route);
 
@@ -153,6 +163,7 @@ function afterRender(app) {
   if (current.page === 'trip') {
     const trip = getTrip(current.tripId);
     hydrate(app, Object.fromEntries(trip.foods.map((f) => [`food:${f.id}`, f])));
+    D.afterRender(app, trip);
   } else {
     hydrate(app, Object.fromEntries(store.data.trips.map((t) => [`trip:${t.id}`, t])));
   }
@@ -172,6 +183,7 @@ function refresh() {
       const food = trip.foods.find((f) => f.id === detail.foodId);
       if (food) fillDetail(trip, food); else closeDetail();
     }
+    D.refreshOverlay(trip);
   } else {
     app.innerHTML = tripsPage(true);
     afterRender(app);
@@ -198,7 +210,8 @@ function tripsPage(quiet = false) {
           <div class="info">
             <div style="display:flex;justify-content:space-between;align-items:center"><h2>${esc(t.name)}</h2>${I.next}</div>
             ${t.locations.length ? `<div class="tags">${t.locations.map((l) => `<span class="tag">${esc(l.name)}</span>`).join('')}</div>` : ''}
-            <div class="stats"><span><b>${t.foods.length}</b> dishes</span><span><b>${(t.destinations || []).length}</b> destinations</span></div>
+            <div class="stats"><span><b>${t.foods.length}</b> dishes</span><span><b>${(t.places || []).length}</b> places</span><span><b>${(t.days || []).length}</b> days</span></div>
+            ${t.startDate ? `<span class="hint">${esc(D.fmtDate(t.startDate))}${t.endDate ? ` – ${esc(D.fmtDate(t.endDate))}` : ''}</span>` : ''}
           </div>
         </a>`).join('')}
       ${store.canCreate() ? `<button class="new-trip" data-action="new-trip">${I.plus}New trip</button>` : ''}
@@ -243,7 +256,7 @@ function tripPage(trip, quiet = false) {
       <button data-action="tab" data-value="food" aria-pressed="${ui.tab === 'food'}">Food</button>
       <button data-action="tab" data-value="destinations" aria-pressed="${ui.tab === 'destinations'}">Destinations</button>
     </div>
-    <div id="tab-content">${ui.tab === 'food' ? foodTab(trip, quiet) : destinationsTab()}</div>
+    <div id="tab-content">${ui.tab === 'food' ? foodTab(trip, quiet) : D.destinationsTab(trip, quiet)}</div>
   </main>`;
 }
 
@@ -755,6 +768,13 @@ function tripForm(trip, { addLocation = false } = {}) {
       <div class="loc-list" id="tf-locs">${t.locations.map(locRow).join('')}</div>
       <button type="button" class="secondary-btn" id="tf-add" style="align-self:flex-start">${I.plusXs}Add location</button>
       <span class="hint">Removing a location also removes its restaurant spots.</span></div>
+    <div class="field"><span class="label">Travel dates (optional)</span>
+      <div class="price-row">
+        <input class="input" type="date" id="tf-start" value="${esc(t.startDate || '')}" aria-label="First day">
+        <span style="color:var(--muted)">–</span>
+        <input class="input" type="date" id="tf-end" value="${esc(t.endDate || '')}" aria-label="Last day">
+      </div>
+      <span class="hint">Day 1, Day 2… match these dates, and you get the weather for each day.</span></div>
     <div class="field"><span class="label">Currency</span>
       <div class="price-row">
         <input class="input" id="tf-local" value="${esc(t.currency.local)}" aria-label="Local currency symbol" style="max-width:72px;text-align:center">
@@ -800,21 +820,31 @@ function tripForm(trip, { addLocation = false } = {}) {
         .map((l) => { const id = l.id || uniqueId(l.name, taken.concat(t.locations.map((x) => x.id))); taken.push(id); return { id, name: l.name }; });
       const currency = { ...t.currency, local: $('#tf-local', el).value.trim() || t.currency.local, home: $('#tf-home', el).value.trim() || t.currency.home, rate };
       const cover = $('#tf-cover', el).value.trim();
+      const startDate = $('#tf-start', el).value || '';
+      let endDate = $('#tf-end', el).value || '';
+      if (endDate && !startDate) { err.textContent = 'Add the first day too, or clear both dates.'; err.hidden = false; return false; }
+      if (startDate && endDate && endDate < startDate) { err.textContent = 'The last day is before the first day.'; err.hidden = false; return false; }
+      if (startDate && endDate && D.daysBetween(startDate, endDate) > 59) { err.textContent = 'Trips can be up to 60 days long.'; err.hidden = false; return false; }
+      if (startDate && !endDate) endDate = '';
       if (!(await ensureName())) return false;
       if (isNew) {
         const id = uniqueId(name, store.data.trips.map((x) => x.id));
-        const nt = { ...t, id, name, cover, coverWiki: [name], currency, locations };
+        const nt = { ...t, id, name, cover, coverWiki: [name], currency, locations, startDate, endDate, places: [], days: [] };
+        D.fillDaysForDates(nt);
         store.update((d) => { if (!d.trips.some((x) => x.id === id)) d.trips.push(JSON.parse(JSON.stringify(nt))); }, `Add trip: ${name}`,
           { kind: 'trip', action: 'added', tripId: id, tripName: name, target: name, details: locations.length ? [`Locations: ${locations.map((l) => l.name).join(', ')}`] : [] });
         location.hash = `#/trip/${encodeURIComponent(id)}`;
       } else {
         const id = trip.id;
         const keep = new Set(locations.map((l) => l.id));
-        const details = tripDiff(trip, { name, cover, currency, locations });
+        const details = tripDiff(trip, { name, cover, currency, locations, startDate, endDate });
         if (!details.length) return true;
         store.update((d) => {
           const x = d.trips.find((y) => y.id === id); if (!x) return;
           x.name = name; x.cover = cover; x.currency = currency; x.locations = locations;
+          x.startDate = startDate; x.endDate = endDate;
+          D.fillDaysForDates(x);
+          (x.places || []).forEach((pl) => { if (pl.locationId && !keep.has(pl.locationId)) pl.locationId = ''; });
           if (!x.coverWiki || !x.coverWiki.length) x.coverWiki = [name];
           x.foods.forEach((f) => { Object.keys(f.spots || {}).forEach((k) => { if (!keep.has(k)) delete f.spots[k]; }); });
         }, `Update trip: ${name}`, { kind: 'trip', action: 'edited', tripId: id, tripName: name, target: name, details });
@@ -854,6 +884,8 @@ function tripDiff(a, b) {
     out.push(`Exchange rate: ${a.currency.local}1 = ${a.currency.home}${a.currency.rate} → ${b.currency.local}1 = ${b.currency.home}${b.currency.rate}`);
   }
   if ((a.cover || '') !== (b.cover || '')) out.push('Cover photo changed');
+  const dr = (x) => (x.startDate ? `${x.startDate}${x.endDate ? ` – ${x.endDate}` : ''}` : 'none');
+  if (dr(a) !== dr(b)) out.push(`Dates: ${dr(a)} → ${dr(b)}`);
   return out;
 }
 
@@ -880,8 +912,10 @@ function changeItem(c) {
   let target = `<b>${esc(c.target || '')}</b>`;
   if (food) target = `<a href="#/trip/${encodeURIComponent(trip.id)}/food/${encodeURIComponent(food.id)}">${esc(c.target)}</a>`;
   else if (c.kind === 'trip' && trip) target = `<a href="#/trip/${encodeURIComponent(trip.id)}">${esc(c.target)}</a>`;
+  else if (c.kind === 'place' && trip && c.placeId && (trip.places || []).some((x) => x.id === c.placeId)) target = `<a href="#/trip/${encodeURIComponent(trip.id)}/place/${encodeURIComponent(c.placeId)}">${esc(c.target)}</a>`;
+  else if (c.kind === 'day' && trip && c.dayId && (trip.days || []).some((x) => x.id === c.dayId)) target = `<a href="#/trip/${encodeURIComponent(trip.id)}/day/${encodeURIComponent(c.dayId)}">${esc(c.target)}</a>`;
   const what = c.kind === 'data' ? 'imported a data file' : `${esc(c.action)} ${c.kind === 'trip' ? 'trip ' : ''}${target}`;
-  const where = c.kind === 'dish' && c.tripName ? `${esc(c.tripName)} · ` : '';
+  const where = ['dish', 'place', 'day'].includes(c.kind) && c.tripName ? `${esc(c.tripName)} · ` : '';
   const details = (c.details || []).filter(Boolean);
   return `<li class="change">
     ${avatar(c.by || '?')}
@@ -1169,12 +1203,17 @@ function settingsSheet() {
 // ---------------------------------------------------------------- events
 
 document.addEventListener('click', (e) => {
-  const a = e.target.closest('a.card-link');
-  if (a) detailOpenedInApp = true;
+  const a = e.target.closest('a[href^="#/trip/"]');
+  if (a) {
+    const href = a.getAttribute('href');
+    if (/\/food\//.test(href)) detailOpenedInApp = true;
+    else if (/\/(place|day)\//.test(href)) D.markInApp();
+  }
   const b = e.target.closest('[data-action]');
   if (!b) return;
   const action = b.dataset.action;
   const trip = current.tripId && getTrip(current.tripId);
+  if (trip && D.handleClick(action, b, trip)) return;
   switch (action) {
     case 'settings': settingsSheet(); break;
     case 'invite': inviteSheet(trip ? [trip.id] : []); break;
@@ -1204,7 +1243,8 @@ document.addEventListener('click', (e) => {
         c.setAttribute('aria-pressed', String(on));
         c.innerHTML = `${on ? I.pin : ''}${esc(trip.locations.find((l) => l.id === c.dataset.loc).name)}`;
       });
-      refreshGroups(trip);
+      if (ui.tab === 'food') refreshGroups(trip);
+      else { const box = $('#tab-content'); box.innerHTML = D.destinationsTab(trip); D.afterRender(box, trip); }
       break;
     }
     case 'tab': {
@@ -1212,8 +1252,9 @@ document.addEventListener('click', (e) => {
       ui.tab = b.dataset.value;
       pressOnly(b.parentElement, b);
       const box = $('#tab-content');
-      box.innerHTML = ui.tab === 'food' ? foodTab(trip) : destinationsTab();
+      box.innerHTML = ui.tab === 'food' ? foodTab(trip) : D.destinationsTab(trip);
       hydrate(box, Object.fromEntries(trip.foods.map((f) => [`food:${f.id}`, f])));
+      D.afterRender(box, trip);
       break;
     }
     case 'cat': {
@@ -1263,10 +1304,20 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const sheets = $$('.sheet:not(.out)');
   if (sheets.length) { $('[data-sheet="cancel"]', sheets[sheets.length - 1]).click(); return; }
-  if (detail) leaveDetail();
+  if (detail) { leaveDetail(); return; }
+  if (D.hasOverlay()) D.leaveOverlay();
 });
 
 // ---------------------------------------------------------------- boot
+
+D.setup({
+  store, esc, toast, openSheet, ensureName, getName, avatar, twoStepDelete, syncSegmented, pressOnly,
+  activeLoc, hydrate, hydrateImage, uniqueId, getTrip, ui: () => ui,
+  navigate(href) {
+    if (/\/food\//.test(href)) detailOpenedInApp = true; else if (/\/(place|day)\//.test(href)) D.markInApp();
+    location.hash = href;
+  },
+});
 
 store.onSaved = (where, opts = {}) => { if (!opts.quiet) toast(where === 'shared' ? 'Saved for everyone' : 'Saved on this device'); };
 store.onRenamed = (from, to) => { if (current.tripId === from) location.replace(`#/trip/${encodeURIComponent(to)}`); };

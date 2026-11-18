@@ -55,6 +55,28 @@ Without a sync server (empty `syncUrl`), the site keeps everything in the browse
 Tap the heart on a dish to show you want to try it. The number shows how many people are interested;
 the dish page lists who. *Sort → Interest* orders the list by hearts.
 
+## Destinations
+
+**Places & events**: sights, museums, parks or events to visit, each with a map pin (search a
+name, paste a Google Maps link or coordinates, then drag the pin), indoor/outdoor, a recommended
+visit time, opening hours and closed days (places) or dates and daily hours (events), price, link,
+notes and hearts. Filter by type or indoor/outdoor, or switch to a map.
+
+**Day plans**: one shared plan per day. Set travel dates on the trip (optional) and Day 1, Day 2…
+match them automatically. In *Edit plan*:
+
+- tap a card in the tray (places, or dishes from the food list) to add it to the next free slot,
+  or drag it onto the timeline;
+- drag a block to move it, pull its bottom edge to change its length (5-minute steps;
+  on phones, press and hold a block first);
+- tap a block to type an exact time or remove it.
+
+The plan shows approximate travel times between stops (from distance, not timetables), the hourly
+weather for dated days within the next 16 days ([Open-Meteo](https://open-meteo.com)), and warnings
+for rain during outdoor stops, closing hours, closed days, event dates and tight connections. On the
+day itself it shows what's on now, what's next and when to leave. *Map* shows the stops as numbered
+pins (OpenStreetMap). Location search uses OpenStreetMap's Nominatim.
+
 ## Track changes
 
 Cloud button → **Track changes** lists every add, edit and delete in the trips you can see, grouped by
