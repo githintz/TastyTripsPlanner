@@ -77,6 +77,26 @@ for rain during outdoor stops, closing hours, closed days, event dates and tight
 day itself it shows what's on now, what's next and when to leave. *Map* shows the stops as numbered
 pins (OpenStreetMap). Location search uses OpenStreetMap's Nominatim.
 
+### Smart planning
+
+- **Autofill**: start typing a name when adding a place; picking a suggestion fills in the pin,
+  address, photo, description and opening hours (when OpenStreetMap has them), plus a guessed
+  indoor/outdoor and visit time based on the type of place.
+- **Popular in …**: the best-known sights near each city, ranked by how many Wikipedia language
+  editions cover them (Wikidata). Cached in the browser for 30 days.
+- **Plan my days**: fills empty days from your hearted (or all) places: grouped by area, spread
+  evenly, within your day hours and pace, respecting opening hours, closed days and event dates,
+  with an optional lunch (a hearted dish) and outdoor places moved to dry days when there's a forecast.
+- **Optimise route**: in the day editor, reorders stops to cut travel. Events and meals keep their
+  times; tap a stop to lock any other.
+- **Stays**: add your hotel as a *Stay* with check-in and check-out days. Days in between start and
+  end there, and its distance counts when optimising.
+- **Past trips**: trips with dates split into upcoming and past, with a map of everywhere your day
+  plans took you.
+
+Data sources: [Wikidata](https://www.wikidata.org), [OpenStreetMap](https://www.openstreetmap.org)
+(Overpass and Nominatim). All free and keyless.
+
 ## Track changes
 
 Cloud button → **Track changes** lists every add, edit and delete in the trips you can see, grouped by

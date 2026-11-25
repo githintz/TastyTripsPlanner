@@ -1,6 +1,8 @@
 // Destinations: places & events, day plans (timeline with drag / stretch),
 // approximate travel times, weather (Open-Meteo), maps (Leaflet + OpenStreetMap).
 
+import * as X from './discover.js';
+
 let C; // helpers handed over by app.js
 export function setup(ctx) { C = ctx; }
 
@@ -54,6 +56,12 @@ const ICON = {
   place: svg('<path d="M3 21h18M5 21V9l7-5 7 5v12M9 21v-6h6v6"/>', 26, 'stroke-width="1.4"'),
   event: svg('<circle cx="12" cy="12" r="2.5"/><path d="M12 4.5a3 3 0 010 5M12 14.5a3 3 0 010 5M4.5 12a3 3 0 015 0M14.5 12a3 3 0 015 0"/>', 26, 'stroke-width="1.4"'),
   locate: svg('<circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="8"/>', 16),
+  bed: svg('<path d="M3 18V7M3 14h18v4M21 14v-2a3 3 0 00-3-3h-7v5"/><circle cx="7" cy="11" r="1.8"/>', 26, 'stroke-width="1.4"'),
+  home: svg('<path d="M3 12l9-8 9 8M5 10v10h14V10"/>', 12, 'stroke-width="2.4"'),
+  route: svg('<circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="6" r="2.5"/><path d="M7.5 18H15a3.5 3.5 0 000-7H9a3.5 3.5 0 010-7h7.5"/>', 15, 'stroke-width="2"'),
+  lock: svg('<rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>', 13, 'stroke-width="2"'),
+  spark: svg('<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/>', 15),
+  star: svg('<path d="M12 3l2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>', 15),
 };
 
 const SETTING = { indoor: 'Indoor', outdoor: 'Outdoor', both: 'Indoor & outdoor' };
@@ -81,6 +89,32 @@ function isToday(trip, day) {
   return lsGet(`tt.today.${trip.id}`, '') === `${day.id}|${todayISO()}`;
 }
 const effectiveDate = (trip, day) => (isToday(trip, day) ? todayISO() : dayDate(trip, day));
+
+const isStay = (p) => p && p.kind === 'stay';
+const dayIdx = (trip, id) => daysOf(trip).findIndex((d) => d.id === id);
+/** The stay you sleep at after this day ('night') or woke up in ('morning'). */
+export function stayFor(trip, day, when) {
+  const k = dayIdx(trip, day.id);
+  if (k < 0) return null;
+  return placesOf(trip).find((p) => {
+    if (!isStay(p) || p.lat == null) return false;
+    const a = dayIdx(trip, p.checkIn); const b = p.checkOut ? dayIdx(trip, p.checkOut) : daysOf(trip).length - 1;
+    if (a < 0) return false;
+    return when === 'night' ? a <= k && k < b : a < k && k <= b;
+  }) || null;
+}
+const stayPoint = (p) => (p ? { lat: p.lat, lng: p.lng, name: p.name, kind: 'stay' } : null);
+/** Everyone who's shown up on this trip (hearts or edits). */
+function groupNames(trip) {
+  const set = new Set();
+  [...trip.foods, ...placesOf(trip)].forEach((x) => (x.likes || []).forEach((n) => set.add(n)));
+  (trip.changes || []).forEach((c) => c.by && c.by !== 'Someone' && set.add(c.by));
+  return set;
+}
+const interestLine = (trip, likes) => {
+  const n = (likes || []).length; const m = groupNames(trip).size;
+  return n && m > 1 ? `♥ ${n} of ${m} interested` : '';
+};
 
 function stopInfo(trip, stop) {
   if (stop.type === 'food') {
@@ -204,7 +238,13 @@ const pinIcon = (L, label, cls = '') => L.divIcon({ className: '', html: `<span 
 // ---------------------------------------------------------------- shared UI bits
 
 const badge = (text, cls) => `<span class="dbadge ${cls}">${C.esc(text)}</span>`;
-function placeMeta(p) {
+function stayMeta(trip, p) {
+  const label = (id) => { const i = dayIdx(trip, id); if (i < 0) return ''; const iso = dayDate(trip, daysOf(trip)[i]); return `Day ${i + 1}${iso ? ` (${fmtDate(iso, { day: 'numeric', month: 'short' })})` : ''}`; };
+  const a = label(p.checkIn); const b = p.checkOut ? label(p.checkOut) : 'end of trip';
+  return a ? `Check in ${a} · out ${b}` : 'Dates not set';
+}
+function placeMeta(p, trip) {
+  if (p.kind === 'stay') return trip ? stayMeta(trip, p) : 'Stay';
   if (p.kind === 'event') {
     const d = p.dateFrom ? `${fmtDate(p.dateFrom, { day: 'numeric', month: 'short' })}${p.dateTo && p.dateTo !== p.dateFrom ? ` – ${fmtDate(p.dateTo, { day: 'numeric', month: 'short' })}` : ''}` : '';
     const t = p.open && p.close ? `${p.open}–${p.close}` : '';
@@ -244,18 +284,18 @@ function placesBody(trip, quiet) {
   const loc = C.activeLoc(trip);
   const all = placesOf(trip).filter((p) => !loc || !p.locationId || p.locationId === loc.id);
   const f = dui.filter;
-  const pass = (p) => f === 'all' || (f === 'place' && p.kind !== 'event') || (f === 'event' && p.kind === 'event')
-    || (f === 'indoor' && p.setting !== 'outdoor') || (f === 'outdoor' && p.setting !== 'indoor');
+  const pass = (p) => f === 'all' || (f === 'place' && !p.kind || f === 'place' && p.kind === 'place') || (f === 'event' && p.kind === 'event')
+    || (f === 'stay' && isStay(p)) || (!isStay(p) && ((f === 'indoor' && p.setting !== 'outdoor') || (f === 'outdoor' && p.setting !== 'indoor')));
   const list = all.filter(pass).sort((a, b) => (b.likes || []).length - (a.likes || []).length || a.name.localeCompare(b.name));
   const count = (fn) => all.filter(fn).length;
   const pill = (id, label, n) => `<button class="pill" data-action="dfilter" data-value="${id}" aria-pressed="${f === id}">${label}${n != null ? `<span class="n">${n}</span>` : ''}</button>`;
   return `
     <div class="pills" role="group" aria-label="Filter">
-      ${pill('all', 'All', all.length)}${pill('place', 'Places', count((p) => p.kind !== 'event'))}${pill('event', 'Events', count((p) => p.kind === 'event'))}
-      ${pill('indoor', 'Indoor')}${pill('outdoor', 'Outdoor')}
+      ${pill('all', 'All', all.length)}${pill('place', 'Places', count((p) => !p.kind || p.kind === 'place'))}${pill('event', 'Events', count((p) => p.kind === 'event'))}
+      ${count(isStay) ? pill('stay', 'Stays', count(isStay)) : ''}${pill('indoor', 'Indoor')}${pill('outdoor', 'Outdoor')}
     </div>
     <div class="dest-bar">
-      <span class="hint">${list.length ? 'Sorted by interest' : ''}</span>
+      <button class="secondary-btn" data-action="popular">${ICON.star}Popular${loc ? ` in ${C.esc(loc.name)}` : ''}</button>
       <div class="segmented sm" role="group" aria-label="View">
         <span class="thumb"></span>
         <button data-action="dview" data-value="list" aria-pressed="${dui.view === 'list'}" aria-label="List view">${ICON.list}</button>
@@ -263,24 +303,29 @@ function placesBody(trip, quiet) {
       </div>
     </div>
     ${dui.view === 'map' ? '<div class="places-map" id="places-map"></div>' : ''}
-    ${!list.length ? `<div class="empty"><h2>${all.length ? 'Nothing here' : 'No places yet'}</h2><p>${all.length ? 'No places match this filter.' : `Add sights, museums, parks or events you might want to visit${loc ? ` in ${C.esc(loc.name)}` : ''}.`}</p></div>`
+    ${!list.length ? `<div class="empty"><h2>${all.length ? 'Nothing here' : 'No places yet'}</h2><p>${all.length ? 'No places match this filter.' : `Add sights, museums, parks, events or your hotel${loc ? ` in ${C.esc(loc.name)}` : ''}, or browse what's popular.`}</p>${all.length ? '' : `<button class="primary-btn" data-action="popular" style="margin-top:16px;height:44px">${ICON.star}&nbsp;Browse popular places</button>`}</div>`
     : dui.view === 'list' ? `<div class="food-grid" style="margin-top:12px">${list.map((p, i) => placeCard(trip, p, quiet ? 0 : Math.min(i, 12), quiet)).join('')}</div>` : ''}`;
 }
 
+const themeOf = (p) => (isStay(p) ? { bg: '#EDE9E3', bar: '#7A736C', ink: '#3A3734', sub: '#5A544E' } : p.kind === 'event' ? THEME.event : THEME[p.setting || 'indoor']);
+const iconOf = (p) => (isStay(p) ? ICON.bed : p.kind === 'event' ? ICON.event : ICON.place);
 function placeCard(trip, p, i, quiet) {
   const days = scheduledIn(trip, p.id);
+  const interest = interestLine(trip, p.likes);
+  const t = themeOf(p);
   return `<div class="food-card place-card" style="--i:${i}${quiet ? ';animation:none' : ''}">
     <a class="card-link" href="#/trip/${encodeURIComponent(trip.id)}/place/${encodeURIComponent(p.id)}" aria-label="${C.esc(p.name)}"></a>
-    <div class="photo" style="--tint:${(p.kind === 'event' ? THEME.event : THEME[p.setting || 'indoor']).bg};--tint-ink:${(p.kind === 'event' ? THEME.event : THEME[p.setting || 'indoor']).sub}"><img alt="" data-img="place:${C.esc(p.id)}"><span class="ph">${p.kind === 'event' ? ICON.event : ICON.place}</span></div>
+    <div class="photo" style="--tint:${t.bg};--tint-ink:${t.sub}"><img alt="" data-img="place:${C.esc(p.id)}"><span class="ph">${iconOf(p)}</span></div>
     <div class="body">
       <span class="name">${C.esc(p.name)}</span>
       <div class="badges">
-        ${p.kind === 'event' ? badge('Event', 'ev') : ''}${badge(SETTING[p.setting || 'indoor'], p.setting || 'indoor')}${badge(`~${fmtDur(p.duration || 60)}`, 'dur')}
+        ${isStay(p) ? badge('Stay', 'stay') : `${p.kind === 'event' ? badge('Event', 'ev') : ''}${badge(SETTING[p.setting || 'indoor'], p.setting || 'indoor')}${badge(`~${fmtDur(p.duration || 60)}`, 'dur')}`}
         ${days.map((x) => badge(`Day ${x.n}`, 'day')).join('')}
       </div>
-      <span class="top">${C.esc(placeMeta(p))}</span>
+      <span class="top">${C.esc(placeMeta(p, trip))}</span>
+      ${interest ? `<span class="interest-line">${C.esc(interest)}</span>` : ''}
     </div>
-    ${heartBtn(p)}
+    ${isStay(p) ? '' : heartBtn(p)}
   </div>`;
 }
 
@@ -298,7 +343,8 @@ function daysBody(trip) {
   const range = trip.startDate ? `${fmtDate(trip.startDate)}${trip.endDate ? ` – ${fmtDate(trip.endDate)}` : ''}` : '';
   const head = `<div class="dest-bar" style="margin-top:16px">
       <span class="hint">${range ? `${C.esc(range)} · ` : ''}${days.length} day${days.length === 1 ? '' : 's'} · ${days.filter((d) => (d.stops || []).length).length} planned</span>
-      ${trip.startDate ? '' : '<button class="link-btn" data-action="edit-trip">Add travel dates</button>'}
+      <div class="btn-row">${trip.startDate ? '' : '<button class="link-btn" data-action="edit-trip">Add travel dates</button>'}
+      ${days.length && placesOf(trip).some((p) => !isStay(p)) ? `<button class="secondary-btn" data-action="generate">${ICON.spark}Plan my days</button>` : ''}</div>
     </div>`;
   if (!days.length) {
     return `${head}<div class="empty"><h2>No days yet</h2><p>${trip.startDate ? 'Add a day to start planning.' : 'Add days to plan them. Set travel dates on the trip to match each day to a date and get the weather.'}</p></div>`;
@@ -367,8 +413,8 @@ async function renderPlacesMap(trip) {
   try {
     const { L, map } = await makeMap(el);
     const pts = list.map((p) => {
-      const m = L.marker([p.lat, p.lng], { icon: pinIcon(L, p.kind === 'event' ? '★' : '•', p.kind === 'event' ? 'ev' : p.setting) }).addTo(map);
-      m.bindPopup(`<a href="#/trip/${encodeURIComponent(trip.id)}/place/${encodeURIComponent(p.id)}"><b>${C.esc(p.name)}</b></a><br>${C.esc(placeMeta(p))}`);
+      const m = L.marker([p.lat, p.lng], { icon: pinIcon(L, isStay(p) ? 'H' : p.kind === 'event' ? '★' : '•', isStay(p) ? 'stay' : p.kind === 'event' ? 'ev' : p.setting) }).addTo(map);
+      m.bindPopup(`<a href="#/trip/${encodeURIComponent(trip.id)}/place/${encodeURIComponent(p.id)}"><b>${C.esc(p.name)}</b></a><br>${C.esc(placeMeta(p, trip))}`);
       return [p.lat, p.lng];
     });
     if (pts.length) map.fitBounds(pts, { padding: [36, 36], maxZoom: 15 });
@@ -398,6 +444,8 @@ export function handleClick(action, b, trip) {
     }
     case 'add-place': placeForm(trip, null); return true;
     case 'add-day': addDay(trip); return true;
+    case 'popular': popularSheet(trip); return true;
+    case 'generate': generateSheet(trip); return true;
     case 'like-place': togglePlaceLike(trip, b.dataset.place); return true;
     default: return false;
   }
@@ -534,7 +582,7 @@ function fillPlace(trip, p) {
   const el = ov.el;
   if (ov.map) { try { ov.map.remove(); } catch { /* ignore */ } ov.map = null; }
   const days = scheduledIn(trip, p.id);
-  const theme = p.kind === 'event' ? THEME.event : THEME[p.setting || 'indoor'];
+  const theme = themeOf(p);
   const when = p.kind === 'event' ? { k: 'When', v: placeMeta(p) } : { k: 'Open', v: p.open && p.close ? `${p.open} – ${p.close}` : 'Not set', s: (p.closedDays || []).length ? `Closed ${p.closedDays.map((d) => WEEKDAYS[d]).join(', ')}` : 'Every day' };
   el.setAttribute('aria-label', p.name);
   el.innerHTML = `
@@ -542,18 +590,19 @@ function fillPlace(trip, p) {
       <button class="icon-btn float" data-oa="back" aria-label="Back">${ICON.back}</button>
       <button class="icon-btn float" data-oa="edit-place" aria-label="Edit">${ICON.edit}</button>
     </div></div>
-    <div class="hero"><div class="photo" style="--tint:${theme.bg};--tint-ink:${theme.sub}"><img alt="Photo of ${C.esc(p.name)}" data-img="place">${`<span class="ph">${p.kind === 'event' ? ICON.event : ICON.place}</span>`}</div></div>
+    <div class="hero"><div class="photo" style="--tint:${theme.bg};--tint-ink:${theme.sub}"><img alt="Photo of ${C.esc(p.name)}" data-img="place"><span class="ph">${iconOf(p)}</span></div></div>
     <div class="panel">
       <div class="grabber"></div>
       <div>
-        <span class="eyebrow">${p.kind === 'event' ? 'Event' : 'Place'}${locName(trip, p.locationId) ? ` · ${C.esc(locName(trip, p.locationId))}` : ''}</span>
+        <span class="eyebrow">${isStay(p) ? 'Stay' : p.kind === 'event' ? 'Event' : 'Place'}${locName(trip, p.locationId) ? ` · ${C.esc(locName(trip, p.locationId))}` : ''}</span>
         <h1>${C.esc(p.name)}</h1>
         ${p.description ? `<p class="desc">${C.esc(p.description)}</p>` : ''}
       </div>
       <div class="tiles">
+        ${isStay(p) ? `<div class="tile" style="grid-column:1/-1"><span class="k">Nights</span><span class="big" style="font-size:15px">${C.esc(stayMeta(trip, p))}</span><span class="sub">Days in between start and end here in the plan.</span></div>` : `
         <div class="tile"><span class="k">Recommended time</span><span class="big">~${fmtDur(p.duration || 60)}</span></div>
-        <div class="tile"><span class="k">Setting</span>${badge(SETTING[p.setting || 'indoor'], `${p.setting || 'indoor'} lg`)}</div>
-        <div class="tile"><span class="k">${when.k}</span><span class="big" style="font-size:15px">${C.esc(when.v)}</span>${when.s ? `<span class="sub">${C.esc(when.s)}</span>` : ''}</div>
+        <div class="tile"><span class="k">Setting</span>${badge(SETTING[p.setting || 'indoor'], `${p.setting || 'indoor'} lg`)}</div>`}
+        ${isStay(p) ? '' : `<div class="tile"><span class="k">${when.k}</span><span class="big" style="font-size:15px">${C.esc(when.v)}</span>${when.s ? `<span class="sub">${C.esc(when.s)}</span>` : ''}</div>`}
         <div class="tile"><span class="k">Price</span><span class="big" style="font-size:15px">${C.esc(p.price || '–')}</span>${p.link ? `<a class="sub" href="${C.esc(p.link)}" target="_blank" rel="noopener">Website / tickets</a>` : ''}</div>
       </div>
       ${p.lat != null ? `<div class="map-card"><div class="mini-map" id="place-map"></div>
@@ -561,19 +610,19 @@ function fillPlace(trip, p) {
           <a class="secondary-btn" href="https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lng}" target="_blank" rel="noopener">${ICON.pin}Open in Maps</a></div></div>`
     : '<p class="hint" style="margin:0">No map location yet. Edit the place to add one.</p>'}
       ${p.notes ? `<div class="tile"><span class="k">Notes</span><span style="white-space:pre-line">${C.esc(p.notes)}</span></div>` : ''}
-      <section class="interest">
+      ${isStay(p) ? '' : `<section class="interest">
         <div class="where-head"><h2>Who's interested</h2>${heartBtn(p, 'place', true)}</div>
-        ${(p.likes || []).length ? `<div class="people">${p.likes.map((n) => `<span class="person">${C.avatar(n)}${C.esc(n)}</span>`).join('')}</div>` : '<p class="hint" style="margin:0">Nobody yet.</p>'}
-      </section>
-      <section class="interest">
+        ${(p.likes || []).length ? `<div class="people">${p.likes.map((n) => `<span class="person">${C.avatar(n)}${C.esc(n)}</span>`).join('')}</div>${interestLine(trip, p.likes) ? `<p class="hint" style="margin:0">${C.esc(interestLine(trip, p.likes))}</p>` : ''}` : '<p class="hint" style="margin:0">Nobody yet.</p>'}
+      </section>`}
+      ${isStay(p) ? '' : `<section class="interest">
         <div class="where-head"><h2>In your plan</h2><button class="primary-btn" data-oa="add-to-day">${ICON.cal}&nbsp;Add to a day</button></div>
         ${days.length ? `<div class="people">${days.map((x) => `<a class="person day-chip" href="#/trip/${encodeURIComponent(trip.id)}/day/${encodeURIComponent(x.d.id)}">Day ${x.n} · ${fmtT(x.s.start)}</a>`).join('')}</div>` : '<p class="hint" style="margin:0">Not in any day yet.</p>'}
-      </section>
+      </section>`}
     </div>`;
   C.hydrateImage(el.querySelector('img[data-img]'), { ...p, wiki: p.wiki || [p.name] });
   if (p.lat != null) {
     makeMap(el.querySelector('#place-map'), { dragging: false, scrollWheelZoom: false, zoomControl: false, doubleClickZoom: false, touchZoom: false, keyboard: false })
-      .then(({ L, map }) => { map.setView([p.lat, p.lng], 15); L.marker([p.lat, p.lng], { icon: pinIcon(L, '', p.kind === 'event' ? 'ev' : p.setting) }).addTo(map); if (ov) ov.map = map; })
+      .then(({ L, map }) => { map.setView([p.lat, p.lng], 15); L.marker([p.lat, p.lng], { icon: pinIcon(L, isStay(p) ? 'H' : '', isStay(p) ? 'stay' : p.kind === 'event' ? 'ev' : p.setting) }).addTo(map); if (ov) ov.map = map; })
       .catch(() => {});
   }
 }
@@ -612,6 +661,7 @@ function addToDaySheet(trip, p) {
 function nextSlot(trip, stops, pos) {
   const s = sorted(stops);
   if (!s.length) return 9 * 60;
+  void trip;
   const last = s[s.length - 1];
   const t = travel(stopInfo(trip, last), pos);
   return Math.min(23 * 60, Math.ceil((last.start + last.duration + (t ? t.min : 15)) / 15) * 15);
@@ -625,12 +675,20 @@ function placeForm(trip, place) {
   const p = place ? clone(place) : {
     id: '', kind: 'place', name: '', description: '', locationId: loc ? loc.id : '', address: '', lat: null, lng: null,
     setting: 'indoor', duration: 60, open: '', close: '', closedDays: [], dateFrom: '', dateTo: '', price: '', link: '', image: '', notes: '', likes: [],
+    checkIn: '', checkOut: '', qid: '',
   };
+  const dayOpts = (sel, withEnd) => `${withEnd ? `<option value=""${!sel ? ' selected' : ''}>End of trip</option>` : ''}${daysOf(trip).map((d, i) => {
+    const iso = dayDate(trip, d);
+    return `<option value="${C.esc(d.id)}"${sel === d.id ? ' selected' : ''}>Day ${i + 1}${iso ? ` · ${fmtDate(iso)}` : ''}</option>`;
+  }).join('')}`;
   const seg = (id, val, opts) => `<div class="segmented" role="group" id="${id}"><span class="thumb"></span>${opts.map(([v, l]) => `<button type="button" data-value="${v}" aria-pressed="${val === v}">${l}</button>`).join('')}</div>`;
   const body = `
-    ${seg('pf-kind', p.kind, [['place', 'Place'], ['event', 'Event']])}
+    ${seg('pf-kind', p.kind || 'place', [['place', 'Place'], ['event', 'Event'], ['stay', 'Stay']])}
     <div class="field"><label for="pf-name">Name</label>
-      <input class="input" id="pf-name" value="${C.esc(p.name)}" placeholder="e.g. Tokyo Skytree" maxlength="80" autocomplete="off"></div>
+      <div class="search input-like"><svg class="i sm" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4-4"/></svg>
+        <input id="pf-name" value="${C.esc(p.name)}" placeholder="Start typing, e.g. Fushimi Inari" maxlength="80" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="pf-suggest" aria-autocomplete="list"></div>
+      <div id="pf-suggest" class="suggest" role="listbox" hidden></div>
+      <span class="hint" id="pf-filled" hidden></span></div>
     <div class="field"><label for="pf-desc">Description</label>
       <textarea class="input" id="pf-desc" rows="2" maxlength="200" placeholder="One sentence about it">${C.esc(p.description)}</textarea></div>
     <div class="field"><span class="label">Location</span>
@@ -644,8 +702,15 @@ function placeForm(trip, place) {
     </div>
     ${trip.locations.length > 1 ? `<div class="field"><span class="label">City</span>
       <div class="chips" style="margin:0" id="pf-city">${trip.locations.map((l) => `<button type="button" class="chip" data-value="${C.esc(l.id)}" aria-pressed="${p.locationId === l.id}">${C.esc(l.name)}</button>`).join('')}</div></div>` : ''}
-    <div class="field"><span class="label">Setting</span>${seg('pf-setting', p.setting, [['indoor', 'Indoor'], ['outdoor', 'Outdoor'], ['both', 'Both']])}</div>
-    <div class="field"><span class="label">Recommended time</span>
+    <div class="field" id="pf-stay-only"${isStay(p) ? '' : ' hidden'}><span class="label">Nights</span>
+      <div class="price-row">
+        <select class="input" id="pf-in" aria-label="Check-in day">${dayOpts(p.checkIn || (daysOf(trip)[0] || {}).id, false)}</select>
+        <span style="color:var(--muted)">→</span>
+        <select class="input" id="pf-out" aria-label="Check-out day">${dayOpts(p.checkOut, true)}</select>
+      </div>
+      <span class="hint">${daysOf(trip).length ? 'Check-in day and check-out day. Every day in between starts and ends here.' : 'Add days in Day plans first, then pick the nights here.'}</span></div>
+    <div class="field not-stay"${isStay(p) ? ' hidden' : ''}><span class="label">Setting</span>${seg('pf-setting', p.setting, [['indoor', 'Indoor'], ['outdoor', 'Outdoor'], ['both', 'Both']])}</div>
+    <div class="field not-stay"${isStay(p) ? ' hidden' : ''}><span class="label">Recommended time</span>
       <div class="stepper"><button type="button" class="icon-btn" id="pf-minus" aria-label="15 minutes less">−</button>
         <span id="pf-dur" class="stepper-val">${fmtDur(p.duration)}</span>
         <button type="button" class="icon-btn" id="pf-plus" aria-label="15 minutes more">+</button></div>
@@ -653,7 +718,7 @@ function placeForm(trip, place) {
     </div>
     <div class="field" id="pf-event-only"${p.kind === 'event' ? '' : ' hidden'}><span class="label">Dates</span>
       <div class="price-row"><input class="input" type="date" id="pf-from" value="${C.esc(p.dateFrom)}" aria-label="First day"><span style="color:var(--muted)">–</span><input class="input" type="date" id="pf-to" value="${C.esc(p.dateTo)}" aria-label="Last day"></div></div>
-    <div class="field"><span class="label" id="pf-hours-label">${p.kind === 'event' ? 'Daily hours' : 'Opening hours'}</span>
+    <div class="field not-stay"${isStay(p) ? ' hidden' : ''}><span class="label" id="pf-hours-label">${p.kind === 'event' ? 'Daily hours' : 'Opening hours'}</span>
       <div class="price-row"><input class="input" type="time" id="pf-open" value="${C.esc(p.open)}" aria-label="Opens"><span style="color:var(--muted)">–</span><input class="input" type="time" id="pf-close" value="${C.esc(p.close)}" aria-label="Closes"></div>
       <div class="chips" style="margin:0" id="pf-closed"${p.kind === 'event' ? ' hidden' : ''}>${[1, 2, 3, 4, 5, 6, 0].map((d) => `<button type="button" class="chip sm" data-value="${d}" aria-pressed="${(p.closedDays || []).includes(d)}">${WEEKDAYS[d]}</button>`).join('')}</div>
       <span class="hint" id="pf-closed-hint"${p.kind === 'event' ? ' hidden' : ''}>Tap the days it's closed.</span>
@@ -677,7 +742,11 @@ function placeForm(trip, place) {
         p.kind = v;
         $('#pf-event-only').hidden = v !== 'event'; $('#pf-closed').hidden = v === 'event'; $('#pf-closed-hint').hidden = v === 'event';
         $('#pf-hours-label').textContent = v === 'event' ? 'Daily hours' : 'Opening hours';
+        $('#pf-stay-only').hidden = v !== 'stay';
+        el.querySelectorAll('.not-stay').forEach((x) => { x.hidden = v === 'stay'; });
+        if (v === 'stay') C.syncSegmented(el, false);
       });
+      setupAutofill(trip, p, el, () => showPin());
       segClick('#pf-setting', (v) => { p.setting = v; });
       const city = $('#pf-city');
       city && city.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; C.pressOnly(city, b); p.locationId = b.dataset.value; });
@@ -753,6 +822,12 @@ function placeForm(trip, place) {
       const open = $('#pf-open').value; const closeT = $('#pf-close').value;
       if ((open && !closeT) || (!open && closeT)) { err.textContent = 'Fill in both opening and closing time, or neither.'; err.hidden = false; return false; }
       if (p.kind === 'event' && $('#pf-from').value && $('#pf-to').value && $('#pf-to').value < $('#pf-from').value) { err.textContent = 'The last day is before the first day.'; err.hidden = false; return false; }
+      if (p.kind === 'stay') {
+        if (p.lat == null) { err.textContent = 'Add the location of your stay so the plan can start and end there.'; err.hidden = false; return false; }
+        const a = dayIdx(trip, $('#pf-in').value); const b = $('#pf-out').value ? dayIdx(trip, $('#pf-out').value) : Math.max(daysOf(trip).length - 1, a + 1);
+        if (a < 0) { err.textContent = 'Pick the check-in day (add days in Day plans first).'; err.hidden = false; return false; }
+        if (b <= a) { err.textContent = 'Check-out has to be after check-in.'; err.hidden = false; return false; }
+      }
       if (!(await C.ensureName())) return false;
       const out = {
         ...p,
@@ -763,7 +838,8 @@ function placeForm(trip, place) {
         closedDays: p.kind === 'event' ? [] : [...el.querySelectorAll('#pf-closed [aria-pressed="true"]')].map((b) => +b.dataset.value),
         dateFrom: p.kind === 'event' ? $('#pf-from').value : '', dateTo: p.kind === 'event' ? ($('#pf-to').value || $('#pf-from').value) : '',
         price: $('#pf-price').value.trim(), link: $('#pf-link').value.trim(), image: $('#pf-img').value.trim(), notes: $('#pf-notes').value.trim(),
-        wiki: place && place.name === name ? place.wiki : [name],
+        checkIn: p.kind === 'stay' ? $('#pf-in').value : '', checkOut: p.kind === 'stay' ? $('#pf-out').value : '',
+        wiki: p.wiki && p.wiki.length && (!place || place.name === name || p.qid) ? p.wiki : [name],
       };
       const tid = trip.id;
       C.store.update((d) => {
@@ -774,7 +850,7 @@ function placeForm(trip, place) {
         else t.places.push({ ...clone(out), likes: [] });
       }, `${place ? 'Update' : 'Add'} ${name}`, {
         kind: 'place', action: place ? 'edited' : 'added', tripId: tid, tripName: trip.name, placeId: out.id, target: name,
-        details: [[out.kind === 'event' ? 'Event' : 'Place', SETTING[out.setting], `~${fmtDur(out.duration)}`].join(' · ')],
+        details: [out.kind === 'stay' ? `Stay · ${stayMeta(trip, out)}` : [out.kind === 'event' ? 'Event' : 'Place', SETTING[out.setting], `~${fmtDur(out.duration)}`].join(' · ')],
       });
       return true;
     },
@@ -843,8 +919,12 @@ function stopWarnings(trip, iso, wx, stop, info, next) {
 
 function timelineHTML(trip, day, iso, wx, editable, now) {
   const stops = sorted(day.stops || []);
-  const minS = stops.length ? Math.min(...stops.map((s) => s.start)) : 9 * 60;
-  const maxE = stops.length ? Math.max(...stops.map((s) => s.start + s.duration)) : 18 * 60;
+  const morning = stayPoint(stayFor(trip, day, 'morning') || stayFor(trip, day, 'night'));
+  const night = stayPoint(stayFor(trip, day, 'night') || stayFor(trip, day, 'morning'));
+  const tIn = stops.length && morning ? travel(morning, stopInfo(trip, stops[0])) : null;
+  const tOut = stops.length && night ? travel(stopInfo(trip, stops[stops.length - 1]), night) : null;
+  const minS = stops.length ? Math.min(...stops.map((s) => s.start)) - (tIn ? tIn.min + 20 : 0) : 9 * 60;
+  const maxE = stops.length ? Math.max(...stops.map((s) => s.start + s.duration)) + (tOut ? tOut.min + 20 : 0) : 18 * 60;
   const h0 = clamp(Math.min(8, Math.floor(minS / 60) - (editable ? 1 : 0)), 0, 23);
   const h1 = clamp(Math.max(20, Math.ceil(maxE / 60) + (editable ? 1 : 0)), h0 + 4, 24);
   const y = (m) => (m - h0 * 60) * PX + 14;
@@ -886,7 +966,17 @@ function timelineHTML(trip, day, iso, wx, editable, now) {
     return `<div class="tl-link${tight ? ' tight' : ''}" style="top:${top}px">${t.mode === 'walk' ? ICON.walk : ICON.train}${t.mode === 'walk' ? 'Walk' : 'Transit'} ~${t.min} min</div>`;
   }).join('');
   const nowLine = now != null && now >= h0 * 60 && now <= h1 * 60 ? `<div class="tl-now" style="top:${y(now)}px"><span>${fmtT(now)}</span></div>` : '';
-  return `<div class="tl" id="tl" style="height:${y(h1 * 60) + 20}px">${rows.join('')}${links}${blocks}${nowLine}<div class="tl-drop" id="tl-drop" hidden></div></div>`;
+  let anchors = '';
+  if (tIn) {
+    const leave = stops[0].start - tIn.min;
+    anchors += `<div class="tl-anchor" style="top:${y(leave) - 22}px"><span class="ta-ico">${ICON.home}</span><b>Leave ${C.esc(morning.name)}</b><span>${fmtT(leave)} · ${tIn.mode === 'walk' ? 'walk' : 'transit'} ~${tIn.min} min</span></div>`;
+  }
+  if (tOut) {
+    const last = stops[stops.length - 1];
+    const back = last.start + last.duration + tOut.min;
+    anchors += `<div class="tl-anchor" style="top:${y(back) - 4}px"><span class="ta-ico">${ICON.home}</span><b>Back at ${C.esc(night.name)}</b><span>~${fmtT(back)} · ${tOut.mode === 'walk' ? 'walk' : 'transit'} ~${tOut.min} min</span></div>`;
+  }
+  return `<div class="tl" id="tl" style="height:${y(h1 * 60) + 20}px">${rows.join('')}${links}${anchors}${blocks}${nowLine}<div class="tl-drop" id="tl-drop" hidden></div></div>`;
 }
 
 function nowNextHTML(trip, day) {
@@ -907,7 +997,8 @@ function nowNextHTML(trip, day) {
   }
   if (next) {
     const info = stopInfo(trip, next);
-    const from = cur ? stopInfo(trip, cur) : null;
+    const prev = [...stops].reverse().find((s) => s.start + s.duration <= now);
+    const from = cur ? stopInfo(trip, cur) : prev ? stopInfo(trip, prev) : stayPoint(stayFor(trip, day, 'morning') || stayFor(trip, day, 'night'));
     const t = travel(from, info);
     const leave = t ? next.start - t.min : null;
     const dest = info.lat != null ? `https://www.google.com/maps/dir/?api=1&destination=${info.lat},${info.lng}&travelmode=transit` : null;
@@ -951,11 +1042,16 @@ function renderDay({ keepScroll = false } = {}) {
         <button data-oa="view" data-value="timeline" aria-pressed="${ov.view === 'timeline'}">Timeline</button>
         <button data-oa="view" data-value="map" aria-pressed="${ov.view === 'map'}">Map</button>
       </div>
-      ${ov.edit ? '<span class="hint">Drag to move · pull the bottom edge to change length</span>'
+      ${ov.edit ? `<button class="secondary-btn" data-oa="optimise"${(day.stops || []).length > 2 ? '' : ' disabled'}>${ICON.route}Optimise route</button>`
     : `<button class="secondary-btn" data-oa="edit-plan">${ICON.edit}Edit plan</button>`}
     </div>
+    ${ov.edit && ov.optimised ? `<div class="opt-banner"><div class="grow"><b>${ov.optimised.saved > 0 ? `New order saves ~${fmtDur(ov.optimised.saved)} of travel` : 'This order was already the quickest'}</b>
+      <span>${fmtDur(ov.optimised.before)} → ${fmtDur(ov.optimised.after)}${ov.optimised.locked ? ` · ${ov.optimised.locked} stop${ov.optimised.locked === 1 ? '' : 's'} kept at a fixed time` : ''}</span></div>
+      <button class="secondary-btn" data-oa="undo-opt">Undo</button></div>` : ''}
+    ${ov.edit && !ov.optimised ? '<p class="hint dv-note" style="margin:0 16px 6px">Drag to move · pull the bottom edge to change length · tap for exact times</p>' : ''}
     ${ov.view === 'timeline' ? `
       <div class="dv-body">
+        ${stayCardHTML(trip, day)}
         ${now != null ? nowNextHTML(trip, day) : ''}
         ${wxNote && !ov.edit ? `<p class="hint dv-note">${wxNote}</p>` : ''}
         ${(day.stops || []).length || ov.edit ? timelineHTML(trip, day, iso, ov.wx, !!ov.edit, now)
@@ -985,7 +1081,7 @@ function trayHTML(trip, day) {
   const inDay = new Set((day.stops || []).map((s) => `${s.type}:${s.refId}`));
   let items;
   if (tab === 'places') {
-    items = placesOf(trip).filter((p) => !inDay.has(`place:${p.id}`))
+    items = placesOf(trip).filter((p) => !isStay(p) && !inDay.has(`place:${p.id}`))
       .sort((a, b) => (b.locationId === day.locationId) - (a.locationId === day.locationId) || (b.likes || []).length - (a.likes || []).length || a.name.localeCompare(b.name))
       .map((p) => ({ type: 'place', id: p.id, name: p.name, sub: `~${fmtDur(p.duration || 60)} · ${p.kind === 'event' ? 'Event' : SETTING[p.setting || 'indoor']}`, likes: (p.likes || []).length, theme: p.kind === 'event' ? THEME.event : THEME[p.setting || 'indoor'], other: p.locationId && p.locationId !== day.locationId }));
   } else {
@@ -1022,6 +1118,11 @@ async function renderDayMap(trip, day, today) {
       ov.markers[s.id] = m;
     });
     const pts = stops.map((x) => [x.inf.lat, x.inf.lng]);
+    const st = stayFor(trip, day, 'night') || stayFor(trip, day, 'morning');
+    if (st) {
+      L.marker([st.lat, st.lng], { icon: pinIcon(L, 'H', 'stay') }).addTo(map).bindPopup(`<b>${C.esc(st.name)}</b><br>Your stay`);
+      if (pts.length) { pts.unshift([st.lat, st.lng]); pts.push([st.lat, st.lng]); }
+    }
     if (pts.length > 1) L.polyline(pts, { color: '#1C1B1A', weight: 3, dashArray: '2 8', lineCap: 'round' }).addTo(map);
     if (pts.length) map.fitBounds(pts, { padding: [50, 50], maxZoom: 15 });
     else { const c = await cityCenter(locName(trip, day.locationId)); map.setView(c ? [c.lat, c.lng] : [35.68, 139.76], 12); }
@@ -1080,6 +1181,8 @@ function onOverlayClick(e) {
       if (ov.dirty && !ov.confirmCancel) { ov.confirmCancel = true; b.textContent = 'Tap again to discard'; return; }
       ov.edit = false; ov.work = null; ov.dirty = false; ov.confirmCancel = false; renderDay(); loadDayWeather(); break;
     case 'save-plan': savePlan(); break;
+    case 'optimise': optimiseCurrent(); break;
+    case 'undo-opt': if (ov.optimised) { ov.work.stops = ov.optimised.prev; ov.optimised = null; renderDay({ keepScroll: true }); } break;
     case 'tray': ov.tray = b.dataset.value; renderDay({ keepScroll: true }); break;
     case 'close-pop': b.closest('.tl-pop').remove(); break;
     case 'day-menu': dayMenu(); break;
@@ -1184,7 +1287,7 @@ async function savePlan() {
   }, `Plan Day ${n}`, { kind: 'day', action: 'edited', tripId: trip.id, tripName: trip.name, dayId: did, target: `Day ${n}`, details: [`${stops.length} stops`, ...details] });
 }
 
-function markDirty() { ov.dirty = true; ov.confirmCancel = false; const c = ov.el.querySelector('[data-oa="cancel-edit"]'); if (c) c.textContent = 'Discard'; }
+function markDirty() { if (ov.optimised && !ov.optimising) ov.optimised = null; ov.dirty = true; ov.confirmCancel = false; const c = ov.el.querySelector('[data-oa="cancel-edit"]'); if (c) c.textContent = 'Discard'; }
 
 function addFromTray(key, start) {
   const trip = curTrip();
@@ -1230,6 +1333,7 @@ function stopSheet(stopId) {
         <div class="stepper"><button type="button" class="icon-btn" id="ss-minus" aria-label="15 minutes less">−</button>
           <span id="ss-dur" class="stepper-val">${fmtDur(dur)}</span>
           <button type="button" class="icon-btn" id="ss-plus" aria-label="15 minutes more">+</button></div></div>
+      <label class="toggle-row"><span class="grow">Keep this time fixed when optimising</span><input type="checkbox" id="ss-lock"${isLocked(trip, s) ? ' checked' : ''}></label>
       ${info.href ? `<a class="row-btn" href="${C.esc(info.href)}" id="ss-open"><span class="grow">Open details</span></a>` : ''}
       <button class="danger-btn" type="button" id="ss-remove">${ICON.x}<span>Remove from this day</span></button>`,
     onMount({ el, close }) {
@@ -1246,6 +1350,8 @@ function stopSheet(stopId) {
       const st = parseT(el.querySelector('#ss-start').value);
       if (st != null) s.start = clamp(snap(st), 0, 24 * 60 - dur);
       s.duration = dur;
+      s.locked = el.querySelector('#ss-lock').checked;
+      ov.optimised = null;
       markDirty(); renderDay({ keepScroll: true });
       return true;
     },
@@ -1428,3 +1534,454 @@ function autoScroll(sc, cy) {
 
 /** Placeholder for the hero image of a place in lists (used by app.js hydrate). */
 export const placeImageItem = (p) => ({ ...p, wiki: p.wiki || [p.name] });
+
+// ---------------------------------------------------------------- stays in the day view
+
+function stayCardHTML(trip, day) {
+  const night = stayFor(trip, day, 'night');
+  const st = night || stayFor(trip, day, 'morning');
+  if (!st) return '';
+  const k = dayIdx(trip, day.id); const a = dayIdx(trip, st.checkIn);
+  const b = st.checkOut ? dayIdx(trip, st.checkOut) : daysOf(trip).length - 1;
+  const sub = night ? `Night ${k - a + 1} of ${Math.max(1, b - a)}` : 'Check-out day';
+  return `<a class="stay-card" href="#/trip/${encodeURIComponent(trip.id)}/place/${encodeURIComponent(st.id)}">
+    <span class="sc-ico">${ICON.bed}</span>
+    <span class="grow"><span class="nc-label dark">Staying at</span><b>${C.esc(st.name)}</b><span class="hint">${C.esc(sub)}</span></span>
+    ${ICON.back.replace('M15 18l-6-6 6-6', 'M9 18l6-6-6-6')}
+  </a>`;
+}
+
+// ---------------------------------------------------------------- optimise route
+
+function isLocked(trip, s) {
+  if (s.locked != null) return !!s.locked;
+  const info = stopInfo(trip, s);
+  return info.kind === 'event' || info.kind === 'food';
+}
+const legMin = (a, b) => { const t = travel(a, b); return t ? t.min : 15; };
+function pathCost(points) { let c = 0; for (let i = 1; i < points.length; i++) c += legMin(points[i - 1], points[i]); return c; }
+
+/** Travel minutes for a day as planned (stay → stops → stay). */
+function dayTravel(trip, day, stops) {
+  const s = sorted(stops);
+  if (!s.length) return 0;
+  const m = stayPoint(stayFor(trip, day, 'morning') || stayFor(trip, day, 'night'));
+  const n = stayPoint(stayFor(trip, day, 'night') || stayFor(trip, day, 'morning'));
+  const pts = [m, ...s.map((x) => stopInfo(trip, x)), n].filter(Boolean);
+  return pathCost(pts);
+}
+
+/** Best visiting order for `items` (with lat/lng) between optional start/end points. */
+function bestOrder(items, start, end) {
+  if (items.length < 2) return items.slice();
+  const cost = (seq) => pathCost([start, ...seq, end].filter(Boolean));
+  let best = null;
+  const starts = start ? [null] : items.map((_, i) => i);
+  for (const si of starts) {
+    const rest = items.slice();
+    const seq = [];
+    let cur = start;
+    if (si != null) { cur = rest.splice(si, 1)[0]; seq.push(cur); }
+    while (rest.length) {
+      let bi = 0; let bc = Infinity;
+      rest.forEach((x, i) => { const c = cur ? legMin(cur, x) : 0; if (c < bc) { bc = c; bi = i; } });
+      cur = rest.splice(bi, 1)[0]; seq.push(cur);
+    }
+    // 2-opt
+    let improved = true; let guard = 0;
+    while (improved && guard++ < 50) {
+      improved = false;
+      for (let i = 0; i < seq.length - 1; i++) {
+        for (let j = i + 1; j < seq.length; j++) {
+          const cand = [...seq.slice(0, i), ...seq.slice(i, j + 1).reverse(), ...seq.slice(j + 1)];
+          if (cost(cand) + 0.01 < cost(seq)) { seq.splice(0, seq.length, ...cand); improved = true; }
+        }
+      }
+    }
+    if (!best || cost(seq) < cost(best)) best = seq;
+  }
+  return best;
+}
+
+/**
+ * Re-time a day: movable stops go in `order`, locked stops keep their times,
+ * travel and opening hours are respected. Returns new stop objects.
+ */
+function schedule(trip, day, order, locked, dayStart, startPoint) {
+  const out = [];
+  const lockQ = sorted(locked);
+  let t = dayStart; let prev = startPoint;
+  const q = order.slice();
+  while (q.length || lockQ.length) {
+    const L = lockQ[0];
+    const m = q[0];
+    if (m) {
+      const info = stopInfo(trip, m);
+      const open = info.ref && parseT(info.ref.open);
+      let st = Math.ceil((t + (prev ? legMin(prev, info) : 0)) / 5) * 5;
+      if (open != null && st < open) st = open;
+      const en = st + m.duration;
+      if (!L || en + legMin(info, stopInfo(trip, L)) <= L.start) {
+        out.push({ ...m, start: clamp(st, 0, 1440 - m.duration) });
+        t = en; prev = info; q.shift(); continue;
+      }
+    }
+    if (L) { out.push({ ...L }); t = Math.max(t, L.start + L.duration); prev = stopInfo(trip, L); lockQ.shift(); continue; }
+    // A movable stop that only fits after the last locked one.
+    const info = stopInfo(trip, m);
+    const st = Math.ceil((t + (prev ? legMin(prev, info) : 0)) / 5) * 5;
+    out.push({ ...m, start: clamp(st, 0, 1440 - m.duration) }); t = st + m.duration; prev = info; q.shift();
+  }
+  return out;
+}
+
+function optimiseStops(trip, day, stops) {
+  const s = sorted(stops);
+  const locked = s.filter((x) => isLocked(trip, x));
+  const movable = s.filter((x) => !isLocked(trip, x));
+  const withPos = movable.filter((x) => stopInfo(trip, x).lat != null);
+  const noPos = movable.filter((x) => stopInfo(trip, x).lat == null);
+  const m = stayPoint(stayFor(trip, day, 'morning') || stayFor(trip, day, 'night'));
+  const n = stayPoint(stayFor(trip, day, 'night') || stayFor(trip, day, 'morning'));
+  const items = withPos.map((x) => ({ ...stopInfo(trip, x), _s: x }));
+  const ordered = bestOrder(items, m, n).map((x) => x._s).concat(noPos);
+  const dayStart = s.length ? s[0].start : 9 * 60;
+  return { stops: schedule(trip, day, ordered, locked, dayStart, m), locked: locked.length };
+}
+
+function optimiseCurrent() {
+  const trip = curTrip(); const day = ov.work;
+  if ((day.stops || []).length < 3) { C.toast('Add at least 3 stops to optimise'); return; }
+  const before = dayTravel(trip, day, day.stops);
+  const prev = clone(day.stops);
+  const r = optimiseStops(trip, day, day.stops);
+  const after = dayTravel(trip, day, r.stops);
+  if (after >= before) {
+    ov.optimised = { saved: 0, before, after: before, locked: r.locked, prev };
+  } else {
+    day.stops = r.stops;
+    ov.optimising = true; markDirty(); ov.optimising = false;
+    ov.optimised = { saved: before - after, before, after, locked: r.locked, prev };
+  }
+  renderDay({ keepScroll: true });
+}
+
+// ---------------------------------------------------------------- autofill in the place form
+
+function setupAutofill(trip, p, el, onPin) {
+  const inp = el.querySelector('#pf-name');
+  const box = el.querySelector('#pf-suggest');
+  const filled = el.querySelector('#pf-filled');
+  let timer = null; let seq = 0; let list = [];
+  const near = () => Promise.all(trip.locations.map((l) => cityCenter(l.name))).then((xs) => xs.filter(Boolean));
+  const close = () => { box.hidden = true; inp.setAttribute('aria-expanded', 'false'); };
+  const render = (q) => {
+    if (!list.length) {
+      box.innerHTML = `<div class="sg-foot"><span>No matches on Wikidata</span><button type="button" class="link-btn" data-sg="hand">Add "${C.esc(q)}" by hand</button></div>`;
+    } else {
+      const hl = (t) => C.esc(t).replace(new RegExp(`(${q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'i'), '<b>$1</b>');
+      box.innerHTML = list.map((x, i) => `<button type="button" class="sg-item" role="option" data-sg="${i}">
+        <span class="sg-img"${x.thumb ? ` style="background-image:url('${x.thumb}')"` : ''}></span>
+        <span class="grow"><span class="sg-name">${hl(x.name)}</span><span class="hint">${C.esc(x.description || '')}</span>
+          <span class="badges">${badge(SETTING[x.setting], x.setting)}${badge(`~${fmtDur(x.duration)}`, 'dur')}</span></span>
+      </button>`).join('') + `<div class="sg-foot"><span>From Wikidata &amp; OpenStreetMap</span><button type="button" class="link-btn" data-sg="hand">Add "${C.esc(q)}" by hand</button></div>`;
+    }
+    box.hidden = false; inp.setAttribute('aria-expanded', 'true');
+  };
+  inp.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = inp.value.trim();
+    if (q.length < 3 || p.kind === 'stay' && q.length < 4) { close(); return; }
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      try {
+        const res = await X.searchPlaces(q, await near());
+        if (my !== seq) return;
+        list = res; render(q);
+      } catch { if (my === seq) close(); }
+    }, 320);
+  });
+  inp.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !box.hidden) { e.stopPropagation(); close(); } });
+  box.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-sg]'); if (!b) return;
+    if (b.dataset.sg === 'hand') { close(); return; }
+    const x = list[+b.dataset.sg]; close();
+    await applySuggestion(trip, p, el, x, onPin);
+    filled.hidden = false;
+    filled.textContent = 'Filled in from Wikidata. Indoor/outdoor and time are guesses, so check them.';
+  });
+}
+
+async function applySuggestion(trip, p, el, x, onPin) {
+  const $ = (q) => el.querySelector(q);
+  p.name = x.name; p.qid = x.qid; p.lat = x.lat; p.lng = x.lng; p.wiki = x.wiki;
+  $('#pf-name').value = x.name;
+  if (x.description && !$('#pf-desc').value.trim()) $('#pf-desc').value = x.description.charAt(0).toUpperCase() + x.description.slice(1) + (/[.!?]$/.test(x.description) ? '' : '.');
+  if (x.image && !$('#pf-img').value.trim()) { $('#pf-img').value = x.image; }
+  if (x.link && !$('#pf-link').value.trim()) $('#pf-link').value = x.link;
+  if (p.kind !== 'stay') {
+    p.setting = x.setting; p.duration = x.duration;
+    const sb = $(`#pf-setting [data-value="${x.setting}"]`); if (sb) C.pressOnly($('#pf-setting'), sb);
+    $('#pf-dur').textContent = fmtDur(p.duration);
+  }
+  // City: the nearest of the trip's locations, if it's close.
+  const centers = await Promise.all(trip.locations.map(async (l) => ({ l, c: await cityCenter(l.name) })));
+  const best = centers.filter((c) => c.c).map((c) => ({ ...c, d: X.km(c.c, x) })).sort((a, b) => a.d - b.d)[0];
+  if (best && best.d < 60) {
+    p.locationId = best.l.id;
+    const cb = $(`#pf-city [data-value="${CSS.escape(best.l.id)}"]`); if (cb) C.pressOnly($('#pf-city'), cb);
+  }
+  onPin();
+  X.addressFor(x.lat, x.lng).then((a) => { if (a) { p.address = a; $('#pf-q').value = a; } });
+  if (p.kind !== 'stay') {
+    const h = await X.hoursFor(x.qid);
+    if (h && !$('#pf-open').value) {
+      $('#pf-open').value = h.open; $('#pf-close').value = h.close;
+      el.querySelectorAll('#pf-closed [data-value]').forEach((b) => b.setAttribute('aria-pressed', String(h.closedDays.includes(+b.dataset.value))));
+      const f = $('#pf-filled');
+      if (f) f.textContent = `Filled in from Wikidata. Opening hours from OpenStreetMap (${h.raw}). Indoor/outdoor and time are guesses, so check them.`;
+    }
+  }
+}
+
+// ---------------------------------------------------------------- popular places
+
+function popularSheet(trip) {
+  const st = { loc: C.activeLoc(trip) || trip.locations[0], cat: 'all', list: null, err: '' };
+  if (!st.loc) { C.toast('Add a location to the trip first'); return; }
+  const added = () => new Map(placesOf(trip).map((p) => [p.qid || `name:${p.name.toLowerCase()}`, p]));
+  C.openSheet({
+    title: 'Popular places',
+    body: '<div id="pop-root"></div>',
+    onMount({ el }) {
+      const root = el.querySelector('#pop-root');
+      const draw = () => {
+        const have = added();
+        const items = (st.list || []).filter((x) => st.cat === 'all' || x.category === st.cat);
+        const cats = X.CATEGORIES.filter((c) => c.id === 'all' || (st.list || []).some((x) => x.category === c.id));
+        root.innerHTML = `
+          ${trip.locations.length > 1 ? `<div class="chips" style="margin:0">${trip.locations.map((l) => `<button type="button" class="chip" data-pop-loc="${C.esc(l.id)}" aria-pressed="${l.id === st.loc.id}">${C.esc(l.name)}</button>`).join('')}</div>` : ''}
+          <p class="hint" style="margin:12px 0 0">Top sights in ${C.esc(st.loc.name)}, ranked by how widely they're covered across Wikipedia. Tap + to add.</p>
+          ${st.list ? `<div class="pills" style="margin:12px -20px 0;padding:0 20px 4px">${cats.map((c) => `<button type="button" class="pill" data-pop-cat="${c.id}" aria-pressed="${st.cat === c.id}">${c.label}</button>`).join('')}</div>` : ''}
+          <div class="pop-list">${st.err ? `<p class="hint err">${C.esc(st.err)}</p>` : !st.list ? '<div class="loading" style="min-height:200px"><div class="spinner"></div></div>'
+    : !items.length ? '<p class="hint">Nothing in this category.</p>' : items.map((x, i) => {
+      const have1 = have.get(x.qid) || have.get(`name:${x.name.toLowerCase()}`);
+      const interest = have1 ? interestLine(trip, have1.likes) : '';
+      return `<div class="pop-row" style="--i:${Math.min(i, 14)}">
+              <span class="pop-rank">${i + 1}</span>
+              <span class="sg-img lg"${x.thumb ? ` style="background-image:url('${x.thumb}')"` : ''}></span>
+              <span class="grow"><b>${C.esc(x.name)}</b><span class="hint">${C.esc(x.description)}</span>
+                <span class="hint">${SETTING[x.setting]} · ~${fmtDur(x.duration)}</span>${interest ? `<span class="interest-line">${C.esc(interest)}</span>` : ''}</span>
+              ${have1 ? '<span class="dbadge outdoor">Added</span>' : `<button type="button" class="icon-btn add-pop" data-pop-add="${C.esc(x.qid)}" aria-label="Add ${C.esc(x.name)}">${ICON.plus}</button>`}
+            </div>`;
+    }).join('')}</div>
+          <p class="hint" style="text-align:center;margin-top:12px">From Wikipedia, Wikidata &amp; OpenStreetMap · times and indoor/outdoor are estimates</p>`;
+      };
+      const load = async () => {
+        st.list = null; st.err = ''; draw();
+        try {
+          const c = await cityCenter(st.loc.name);
+          if (!c) throw new Error(`Couldn't find ${st.loc.name} on the map`);
+          st.list = await X.popularNear(c, `${st.loc.name.toLowerCase()}`);
+        } catch (e) { st.err = e.message; }
+        draw();
+      };
+      root.addEventListener('click', async (e) => {
+        const lb = e.target.closest('[data-pop-loc]');
+        if (lb) { st.loc = trip.locations.find((l) => l.id === lb.dataset.popLoc); st.cat = 'all'; load(); return; }
+        const cb = e.target.closest('[data-pop-cat]');
+        if (cb) { st.cat = cb.dataset.popCat; draw(); return; }
+        const ab = e.target.closest('[data-pop-add]');
+        if (!ab) return;
+        if (!(await C.ensureName())) return;
+        const x = st.list.find((y) => y.qid === ab.dataset.popAdd);
+        ab.disabled = true; ab.classList.add('busy');
+        const h = await X.hoursFor(x.qid);
+        const address = await X.addressFor(x.lat, x.lng);
+        const id = C.uniqueId(x.name, placesOf(trip).map((q) => q.id));
+        const place = {
+          id, kind: 'place', name: x.name, description: x.description ? x.description.charAt(0).toUpperCase() + x.description.slice(1) : '',
+          locationId: st.loc.id, address, lat: x.lat, lng: x.lng, setting: x.setting, duration: x.duration,
+          open: h ? h.open : '', close: h ? h.close : '', closedDays: h ? h.closedDays : [], dateFrom: '', dateTo: '',
+          price: '', link: '', image: x.image, notes: '', likes: [], qid: x.qid, wiki: x.wiki,
+        };
+        C.store.update((d) => {
+          const t = d.trips.find((y) => y.id === trip.id); if (!t) return;
+          t.places = t.places || [];
+          if (!t.places.some((q) => q.qid === place.qid)) t.places.push(clone(place));
+        }, `Add ${x.name}`, { kind: 'place', action: 'added', tripId: trip.id, tripName: trip.name, placeId: id, target: x.name, details: ['From Popular places', `${SETTING[x.setting]} · ~${fmtDur(x.duration)}`] });
+        C.toast(`Added ${x.name}`);
+        trip = C.getTrip(trip.id) || trip;
+        draw();
+      });
+      load();
+    },
+  });
+}
+
+// ---------------------------------------------------------------- generate an itinerary
+
+const PACE = { relaxed: 300, balanced: 420, packed: 540 };
+
+function planDays(trip, opts, wxByDay) {
+  const days = daysOf(trip);
+  const targets = days.filter((d) => !(opts.keep && (d.stops || []).length));
+  const busy = new Set();
+  days.filter((d) => !targets.includes(d)).forEach((d) => (d.stops || []).forEach((s) => s.type === 'place' && busy.add(s.refId)));
+  let pool = placesOf(trip).filter((p) => !isStay(p) && p.lat != null && !busy.has(p.id) && (opts.source === 'all' || (p.likes || []).length));
+  const result = [];
+  const usedFood = new Set();
+  targets.forEach((day, ti) => {
+    const iso = dayDate(trip, day);
+    const wx = wxByDay[day.id];
+    const rainHrs = wx ? wx.filter((h) => h.h >= opts.start / 60 && h.h < opts.end / 60 && rainy(h)).length : 0;
+    const wet = opts.dry && rainHrs >= 3;
+    const ok = (p) => (!p.locationId || p.locationId === day.locationId)
+      && !(iso && p.kind !== 'event' && (p.closedDays || []).includes(weekday(iso)))
+      && !(iso && p.kind === 'event' && p.dateFrom && (iso < p.dateFrom || iso > (p.dateTo || p.dateFrom)));
+    const cand = pool.filter(ok);
+    // Share what's left fairly over the remaining days in this city.
+    const daysLeft = targets.slice(ti).filter((d) => d.locationId === day.locationId).length || 1;
+    const cap = opts.pace === 'packed' ? Infinity : Math.max(2, Math.ceil(cand.length / daysLeft));
+    const near = (p) => cand.filter((q) => q !== p && km(p, q) < 3).length;
+    const score = (p) => (p.likes || []).length * 10 - (wet && p.setting === 'outdoor' ? 25 : 0) + (p.kind === 'event' && iso ? 8 : 0);
+    const startPt = stayPoint(stayFor(trip, day, 'morning') || stayFor(trip, day, 'night'));
+    const chosen = [];
+    let used = 0;
+    const budget = PACE[opts.pace] - (opts.lunch ? 0 : 0);
+    const window = opts.end - opts.start - (opts.lunch ? 60 : 0);
+    if (cand.length) {
+      const seed = cand.slice().sort((a, b) => score(b) - score(a) || near(b) - near(a) || a.name.localeCompare(b.name))[0];
+      chosen.push(seed); used = seed.duration || 60;
+      while (true) {
+        const last = chosen[chosen.length - 1];
+        const left = cand.filter((p) => !chosen.includes(p));
+        if (!left.length || chosen.length >= cap) break;
+        const ranked = left.map((p) => ({ p, c: legMin(last, p) + (wet && p.setting === 'outdoor' ? 40 : 0) - (p.likes || []).length * 4 })).sort((a, b) => a.c - b.c);
+        const pick = ranked.find(({ p }) => used + legMin(last, p) + (p.duration || 60) <= Math.min(budget, window));
+        if (!pick) break;
+        used += legMin(last, pick.p) + (pick.p.duration || 60);
+        chosen.push(pick.p);
+      }
+    }
+    // Order and time them.
+    const items = chosen.map((p) => ({ lat: p.lat, lng: p.lng, _p: p }));
+    const night = stayPoint(stayFor(trip, day, 'night') || stayFor(trip, day, 'morning'));
+    const order = bestOrder(items, startPt, night).map((x) => x._p);
+    const stops = [];
+    let t = opts.start; let prev = startPt; let lunchDone = !opts.lunch;
+    const dropped = [];
+    for (const p of order) {
+      let st = Math.ceil((t + (prev ? legMin(prev, p) : 0)) / 5) * 5;
+      const o = parseT(p.open); const cl = parseT(p.close);
+      if (o != null && st < o) st = o;
+      if (!lunchDone && st >= 12 * 60) {
+        const dish = trip.foods.filter((f) => !usedFood.has(f.id) && (f.likes || []).length && ((f.spots || {})[day.locationId] || [])[0])
+          .sort((a, b) => (b.likes || []).length - (a.likes || []).length)[0];
+        const ls = Math.max(12 * 60, Math.ceil(t / 5) * 5);
+        if (dish) { usedFood.add(dish.id); stops.push({ id: uid('s'), type: 'food', refId: dish.id, spot: dish.spots[day.locationId][0].name, start: ls, duration: 60 }); }
+        t = ls + 60; lunchDone = true;
+        st = Math.max(st, Math.ceil((t + 15) / 5) * 5);
+      }
+      const dur = p.duration || 60;
+      if (st + dur > opts.end || (cl != null && cl > (o || 0) && st + dur > cl)) { dropped.push(p); continue; }
+      stops.push({ id: uid('s'), type: 'place', refId: p.id, start: st, duration: dur });
+      t = st + dur; prev = p;
+    }
+    const placed = new Set(stops.filter((s) => s.type === 'place').map((s) => s.refId));
+    pool = pool.filter((p) => !placed.has(p.id));
+    result.push({ day, stops, wet, rainHrs, dropped });
+  });
+  return { result, leftover: pool, skipped: days.length - targets.length };
+}
+
+function generateSheet(trip) {
+  const opts = { source: placesOf(trip).some((p) => !isStay(p) && (p.likes || []).length) ? 'liked' : 'all', pace: 'balanced', start: 9 * 60, end: 20 * 60, keep: true, lunch: true, dry: true };
+  const wxByDay = {};
+  let plan = null;
+  const seg = (key, options) => `<div class="segmented" role="group" data-opt="${key}"><span class="thumb"></span>${options.map(([v, l]) => `<button type="button" data-value="${v}" aria-pressed="${opts[key] === v}">${l}</button>`).join('')}</div>`;
+  const liked = placesOf(trip).filter((p) => !isStay(p) && (p.likes || []).length).length;
+  const allN = placesOf(trip).filter((p) => !isStay(p)).length;
+  C.openSheet({
+    title: 'Plan my days',
+    saveLabel: 'Apply',
+    body: `
+      <div class="field"><span class="label">Plan from</span>${seg('source', [['liked', `♥ With hearts · ${liked}`], ['all', `All places · ${allN}`]])}</div>
+      <div class="field"><span class="label">Pace</span>${seg('pace', [['relaxed', 'Relaxed'], ['balanced', 'Balanced'], ['packed', 'Packed']])}</div>
+      <div class="field"><span class="label">Day hours</span>
+        <div class="price-row"><input class="input" type="time" id="gen-start" value="${fmtT(opts.start)}" aria-label="Days start"><span style="color:var(--muted)">–</span><input class="input" type="time" id="gen-end" value="${fmtT(opts.end)}" aria-label="Days end"></div></div>
+      <div class="toggles">
+        <label class="toggle-row"><span class="grow">Keep days already planned</span><input type="checkbox" data-opt-check="keep" checked></label>
+        <label class="toggle-row"><span class="grow">Add lunch (a hearted dish when there is one)</span><input type="checkbox" data-opt-check="lunch" checked></label>
+        <label class="toggle-row"><span class="grow">Outdoor places on dry days</span><input type="checkbox" data-opt-check="dry" checked></label>
+      </div>
+      <div class="field"><span class="label">Preview</span><div id="gen-preview"><div class="loading" style="min-height:120px"><div class="spinner"></div></div></div></div>`,
+    onMount({ el }) {
+      const preview = () => {
+        plan = planDays(trip, opts, wxByDay);
+        const box = el.querySelector('#gen-preview');
+        if (!plan.result.length) { box.innerHTML = '<p class="hint">Every day already has a plan. Turn off "Keep days already planned" to redo them.</p>'; return; }
+        box.innerHTML = plan.result.map(({ day, stops, wet }) => {
+          const n = dayNumber(trip, day);
+          const iso = dayDate(trip, day);
+          const names = stops.filter((s) => s.type === 'place').map((s) => stopInfo(trip, s).short);
+          const span = stops.length ? `${fmtT(stops[0].start)}–${fmtT(Math.max(...stops.map((s) => s.start + s.duration)))}` : '';
+          return `<div class="gen-day"><div class="gd-head"><b>Day ${n}${iso ? ` · ${fmtDate(iso)}` : ''}</b><span class="hint">${stops.length ? `${stops.length} stop${stops.length === 1 ? '' : 's'} · ${span}` : 'Nothing fits'}${wet ? ' · rain, indoor first' : ''}</span></div>
+            ${stops.length ? dayBar(trip, { stops }) : ''}
+            ${names.length ? `<span class="hint">${C.esc(names.slice(0, 4).join(', '))}${names.length > 4 ? ` +${names.length - 4}` : ''}</span>` : ''}</div>`;
+        }).join('') + (plan.leftover.length ? `<p class="hint warn" style="margin-top:8px">${plan.leftover.length} place${plan.leftover.length === 1 ? '' : 's'} didn't fit: ${C.esc(plan.leftover.slice(0, 4).map((p) => p.name).join(', '))}${plan.leftover.length > 4 ? '…' : ''}. Add a day or choose a busier pace.</p>` : '');
+      };
+      el.querySelectorAll('[data-opt]').forEach((g) => g.addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        C.pressOnly(g, b); opts[g.dataset.opt] = b.dataset.value; preview();
+      }));
+      el.querySelectorAll('[data-opt-check]').forEach((c) => c.addEventListener('change', () => { opts[c.dataset.optCheck] = c.checked; preview(); }));
+      ['#gen-start', '#gen-end'].forEach((id) => el.querySelector(id).addEventListener('change', () => {
+        const a = parseT(el.querySelector('#gen-start').value); const b = parseT(el.querySelector('#gen-end').value);
+        if (a != null && b != null && b > a + 60) { opts.start = a; opts.end = b; preview(); }
+      }));
+      Promise.all(daysOf(trip).map(async (d) => { wxByDay[d.id] = await Promise.race([dayWeather(trip, d), new Promise((r) => setTimeout(() => r(null), 4000))]); }))
+        .finally(preview);
+    },
+    async onSave() {
+      if (!plan || !plan.result.some((r) => r.stops.length)) { C.toast('Nothing to apply'); return false; }
+      if (!(await C.ensureName())) return false;
+      const updates = plan.result.filter((r) => r.stops.length).map((r) => ({ id: r.day.id, stops: clone(r.stops) }));
+      const n = updates.reduce((a, u) => a + u.stops.length, 0);
+      C.store.update((d) => {
+        const t = d.trips.find((x) => x.id === trip.id); if (!t) return;
+        updates.forEach((u) => { const dd = (t.days || []).find((x) => x.id === u.id); if (dd) dd.stops = u.stops; });
+      }, 'Plan days automatically', {
+        kind: 'day', action: 'planned', tripId: trip.id, tripName: trip.name, target: 'days automatically',
+        details: [`${updates.length} day${updates.length === 1 ? '' : 's'} · ${n} stops`, `${opts.pace} pace`],
+      });
+      C.toast(`Planned ${updates.length} day${updates.length === 1 ? '' : 's'}. Fine-tune them in each day.`);
+      return true;
+    },
+  });
+}
+
+// ---------------------------------------------------------------- past trips: where you've been
+
+/** Stops from dated days that are already behind us. */
+export function visitedPlaces(trips) {
+  const today = todayISO();
+  const out = [];
+  trips.forEach((t) => daysOf(t).forEach((d) => {
+    const iso = dayDate(t, d);
+    if (!iso || iso >= today) return;
+    (d.stops || []).forEach((s) => {
+      const inf = stopInfo(t, s);
+      if (inf.lat != null) out.push({ lat: inf.lat, lng: inf.lng, name: inf.short, trip: t.name, city: locName(t, d.locationId) });
+    });
+  }));
+  const seen = new Set();
+  return out.filter((x) => { const k = `${x.name}|${x.lat.toFixed(3)}`; if (seen.has(k)) return false; seen.add(k); return true; });
+}
+export async function renderVisitedMap(el, list) {
+  try {
+    const { L, map } = await makeMap(el, { scrollWheelZoom: false });
+    list.forEach((x) => L.circleMarker([x.lat, x.lng], { radius: 6, color: '#FFFFFF', weight: 2, fillColor: '#B8432F', fillOpacity: 1 }).addTo(map).bindPopup(`<b>${C.esc(x.name)}</b><br>${C.esc(x.trip)}`));
+    map.fitBounds(list.map((x) => [x.lat, x.lng]), { padding: [24, 24], maxZoom: 12 });
+  } catch (e) { el.innerHTML = `<p class="hint" style="padding:12px">${C.esc(e.message)}</p>`; }
+}

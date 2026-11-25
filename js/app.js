@@ -166,6 +166,8 @@ function afterRender(app) {
     D.afterRender(app, trip);
   } else {
     hydrate(app, Object.fromEntries(store.data.trips.map((t) => [`trip:${t.id}`, t])));
+    const vm = $('#visited-map', app);
+    if (vm) D.renderVisitedMap(vm, D.visitedPlaces(store.data.trips));
   }
 }
 
@@ -198,24 +200,53 @@ function syncButton() {
 
 // ---------------------------------------------------------------- trips page
 
+function tripStatus(t) {
+  const today = D.todayISO();
+  const end = t.endDate || (t.startDate ? D.addDays(t.startDate, Math.max(0, (t.days || []).length - 1)) : '');
+  if (!t.startDate) return { group: 'upcoming', label: '' };
+  if (end && end < today) return { group: 'past', label: '' };
+  if (t.startDate <= today) return { group: 'upcoming', label: 'Happening now' };
+  const n = D.daysBetween(today, t.startDate);
+  return { group: 'upcoming', label: n === 1 ? 'Tomorrow' : `In ${n} days` };
+}
+
+function tripCard(t, i, quiet) {
+  const st = tripStatus(t);
+  return `
+    <a class="trip-card${st.group === 'past' ? ' past' : ''}" href="#/trip/${encodeURIComponent(t.id)}" style="--i:${quiet ? 0 : i};${quiet ? 'animation:none' : ''}">
+      <div class="photo"><img alt="" data-img="trip:${esc(t.id)}">${phIcon('trip', 40)}</div>
+      <div class="info">
+        <div style="display:flex;justify-content:space-between;align-items:center"><h2>${esc(t.name)}</h2>${I.next}</div>
+        ${t.locations.length ? `<div class="tags">${t.locations.map((l) => `<span class="tag">${esc(l.name)}</span>`).join('')}</div>` : ''}
+        <div class="stats"><span><b>${t.foods.length}</b> dishes</span><span><b>${(t.places || []).length}</b> places</span><span><b>${(t.days || []).length}</b> days</span></div>
+        ${t.startDate ? `<div class="trip-when"><span class="hint">${esc(D.fmtDate(t.startDate))}${t.endDate ? ` – ${esc(D.fmtDate(t.endDate))}` : ''}</span>${st.label ? `<span class="countdown">${esc(st.label)}</span>` : ''}</div>` : ''}
+      </div>
+    </a>`;
+}
+
 function tripsPage(quiet = false) {
   const trips = store.data.trips;
+  const upcoming = trips.filter((t) => tripStatus(t).group === 'upcoming')
+    .sort((a, b) => (a.startDate || '9999').localeCompare(b.startDate || '9999'));
+  const past = trips.filter((t) => tripStatus(t).group === 'past').sort((a, b) => (b.startDate || '').localeCompare(a.startDate || ''));
+  const visited = D.visitedPlaces(trips);
+  const cities = new Set(visited.map((v) => v.city).filter(Boolean));
+  const tripsVisited = new Set(visited.map((v) => v.trip));
+  let i = 0;
   return `<main class="page"${quiet ? ' style="animation:none"' : ''}>
     <div class="topbar"><span class="brand">Tasty Trips</span>${syncButton()}</div>
     <div class="hero-title"><h1>Your trips</h1><p>Plan what to eat and where to go.</p></div>
+    ${past.length ? '<h2 class="trip-section">Upcoming</h2>' : ''}
     <div class="trip-grid">
-      ${trips.map((t, i) => `
-        <a class="trip-card" href="#/trip/${encodeURIComponent(t.id)}" style="--i:${quiet ? 0 : i};${quiet ? 'animation:none' : ''}">
-          <div class="photo"><img alt="" data-img="trip:${esc(t.id)}">${phIcon('trip', 40)}</div>
-          <div class="info">
-            <div style="display:flex;justify-content:space-between;align-items:center"><h2>${esc(t.name)}</h2>${I.next}</div>
-            ${t.locations.length ? `<div class="tags">${t.locations.map((l) => `<span class="tag">${esc(l.name)}</span>`).join('')}</div>` : ''}
-            <div class="stats"><span><b>${t.foods.length}</b> dishes</span><span><b>${(t.places || []).length}</b> places</span><span><b>${(t.days || []).length}</b> days</span></div>
-            ${t.startDate ? `<span class="hint">${esc(D.fmtDate(t.startDate))}${t.endDate ? ` – ${esc(D.fmtDate(t.endDate))}` : ''}</span>` : ''}
-          </div>
-        </a>`).join('')}
+      ${upcoming.map((t) => tripCard(t, i++, quiet)).join('')}
       ${store.canCreate() ? `<button class="new-trip" data-action="new-trip">${I.plus}New trip</button>` : ''}
     </div>
+    ${past.length ? `<h2 class="trip-section">Past</h2><div class="trip-grid">${past.map((t) => tripCard(t, i++, quiet)).join('')}</div>` : ''}
+    ${visited.length ? `<section class="visited-card">
+      <div class="visited-map" id="visited-map"></div>
+      <div class="visited-foot"><div><b>Places you've been</b><span class="hint">Every stop from past day plans</span></div>
+        <div class="visited-stats"><span><b>${tripsVisited.size}</b>trip${tripsVisited.size === 1 ? '' : 's'}</span><span><b>${cities.size}</b>cit${cities.size === 1 ? 'y' : 'ies'}</span><span><b>${visited.length}</b>place${visited.length === 1 ? '' : 's'}</span></div></div>
+    </section>` : ''}
     ${store.mode === 'shared' && !trips.length ? joinBox() : ''}
   </main>`;
 }
